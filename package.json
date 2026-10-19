@@ -1,0 +1,30 @@
+{
+  "name": "xhot",
+  "version": "1.0.0",
+  "description": "Xhot Trending Video Pipeline: Discover hot topics on X, rank with VL grid, harvest materials, and render presentation videos",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "xhot": "./dist/cli.js"
+  },
+  "scripts": {
+    "start": "tsx src/cli.ts",
+    "xhot": "tsx src/cli.ts",
+    "build": "tsc",
+    "test": "tsx --test tests/*.test.ts",
+    "test:xhot": "tsx --test tests/xhot-pipeline.test.ts"
+  },
+  "dependencies": {
+    "commander": "^13.1.0",
+    "lucide-static": "^1.47.0",
+    "picocolors": "^1.1.1",
+    "playwright-core": "^1.63.0",
+    "sharp": "^0.35.4",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.9",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

@@ -1,0 +1,37 @@
+node_modules/
+dist/
+.chromium-profile/
+.DS_Store
+*.log
+*.jsonl
+out/
+output/
+artifacts/
+.tmp/
+tmp/
+coverage/
+test-output/
+
+# Media outputs
+*.mp4
+*.webm
+*.mkv
+*.wav
+*.mp3
+*.m4a
+*.jpg
+*.jpeg
+*.png
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Tutorial scratch renders
+.tutorial-preview/
+tutorial-preview/
+*.tmp.mjs
+*.voice.json
+
+# Environment
+.env
