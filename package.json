@@ -10,9 +10,16 @@
   "scripts": {
     "start": "tsx src/cli.ts",
     "xhot": "tsx src/cli.ts",
+    "module:auth": "tsx src/modules/auth/cli.ts",
+    "module:discovery": "tsx src/modules/discovery/cli.ts",
+    "module:evaluation": "tsx src/modules/evaluation/cli.ts",
+    "module:harvest": "tsx src/modules/harvest/cli.ts",
+    "module:presentation": "tsx src/modules/presentation/cli.ts",
+    "pipeline:xhot": "tsx src/pipelines/xhot/cli.ts",
     "build": "tsc",
     "test": "tsx --test tests/*.test.ts",
-    "test:xhot": "tsx --test tests/xhot-pipeline.test.ts"
+    "test:modules": "tsx --test tests/modules.test.ts",
+    "test:pipeline": "tsx --test tests/xhot-pipeline.test.ts"
   },
   "dependencies": {
     "commander": "^13.1.0",

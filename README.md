@@ -2,29 +2,71 @@
 
 独立的 X (Twitter) 热点追踪与解说视频自动化生产流水线。
 
-从 X 平台发现热点话题、截取候选推文卡片、通过多模态视觉模型（VL）评估筛选 Top 3 及冠军（#1 Winner）、深度采集相关推文与富媒体素材（高清图片、yt-dlp 视频），并通过 OpusVideo Canvas 渲染引擎生成带语音解说（Edge-TTS / 本地克隆 TTS）的高清展示视频。
+项目采用清晰的 **三层架构（utils/libs, modules, pipelines）** 设计：
+- **Layer 1: utils / libs** —— 领域无关的底层基础库与系统工具（浏览器 CDP 驱动、多模态 LLM 通信、媒体编解码/抽帧/拼图、OpusVideo 播放器与 Edge-TTS 渲染、环境变量加载、日志与通知）。
+- **Layer 2: modules** —— 5 个高内聚、低耦合的独立业务功能模块（`auth`、`discovery`、`evaluation`、`harvest`、`presentation`），支持单独测试（`test<Name>Module`）或独立 CLI 执行。
+- **Layer 3: pipelines** —— 顶层端到端流程编排层，通过 `executeXHotPipeline` 串联 7 个阶段（`check-env` → `x-login` → `x-search-grid` → `x-eval` → `x-harvest` → `x-video` → `report`），统一调度各模块并生成交付报告与消息通知。
 
 ---
 
-## 🌟 特性
+## 🏛️ 三层架构详解
 
-1. **环境与凭据检查 (`check-env`)**
-   - 自动预检 LLM Gateway 连通性、Chromium 浏览器、yt-dlp、ffmpeg 与持久化 Profile 状态。
-2. **X 平台持久化会话与自动登录 (`x-login`)**
-   - 复用 Chromium 持久化 Profile，自动检测会话；如未登录则使用 `X_USERNAME` / `X_PWD` 自动登录，支持会话 Cookie 恢复。
-3. **话题搜索与候选拼图 (`x-search-grid`)**
-   - 检索指定关键词热点推文，自动过滤广告与推广内容（`isPromotedTweet`）。
-   - 截取候选卡片并生成 4×3 / 3×3 高对比度编号黄色角标拼图（Sharp 渲染）。
-4. **多模态 VL 顶尖评估 (`x-eval`)**
-   - 发送拼图及候选元数据至多模态视觉模型（如 `gemini-3.6-flash`），进行热度、讨论度、技术影响力综合评估，评出 Top 3 及冠军 #1。
-5. **深度采集冠军素材 (`x-harvest`)**
-   - 对冠军话题进行二次深度检索，抓取多篇高互动推文、推文截图、原图，并通过 `yt-dlp` 下载演示视频片段。
-6. **OpusVideo 自动解说视频渲染 (`x-video`)**
-   - 自动生成解说分镜故事板（Storyboard）。
-   - Edge-TTS / Local TTS 逐幕合成语音音轨并计算精确词级时间轴。
-   - 生成响应式 HTML5/Canvas 播放器束，通过无头浏览器逐帧确定性渲染为 1080p MP4 视频。
-7. **全链路报告与通知 (`report`)**
-   - 生成结构化 Markdown 与 JSON 报告，自动发送 Telegram / Webhook 成功或失败通知（附带视频或拼图预览）。
+```
+xhot/
+├── .env -> /Users/FrankLin/VM/VideoGen/.env    # 软链接共享 .env 配置
+├── package.json
+├── tsconfig.json
+├── tools/
+│   └── edge_tts_synth.py                      # Edge-TTS Python 辅助脚本
+│
+├── src/
+│   ├── utils/                                 # 【Layer 1A: 通用系统工具层】
+│   │   ├── env.ts                             # 智能 .env 候选路径解析与加载
+│   │   ├── logger.ts                          # 结构化 RunLogger (.log & .jsonl)
+│   │   ├── send_msg.ts                        # Telegram / Webhook 告警与成果通知
+│   │   ├── shutdown.ts                        # 退出缓冲区刷新守护
+│   │   ├── retry.ts                           # 指数退避重试
+│   │   ├── cookies.ts                         # Netscape Cookie 格式化与解析
+│   │   ├── text.ts                            # 文本过滤与关键词脱敏
+│   │   ├── run.ts                             # RunID 生成与输出目录确保
+│   │   └── index.ts
+│   │
+│   ├── libs/                                  # 【Layer 1B: 底层基础设施库层】
+│   │   ├── browser/                           # Chromium 持久化 Profile、CDP 会话管理
+│   │   ├── llm/                               # OpenAI-compatible / Responses API 客户端与 curl 预检
+│   │   ├── media/                             # ffmpeg/ffprobe 抽帧探针与 yt-dlp 视频下载包装
+│   │   ├── player/                            # OpusVideo HTML5/Canvas 播放器、TTS 时间轴与逐帧渲染器
+│   │   └── index.ts
+│   │
+│   ├── modules/                               # 【Layer 2: 业务功能模块层】
+│   │   ├── auth/                              # Module 1: X (Twitter) 登录与会话维持
+│   │   │   ├── auth.ts / contracts.ts / cli.ts / index.ts (包含 testAuthModule)
+│   │   ├── discovery/                         # Module 2: 话题发现与候选推文拼图
+│   │   │   ├── search.ts / grid.ts / contracts.ts / cli.ts / index.ts (包含 testDiscoveryModule)
+│   │   ├── evaluation/                        # Module 3: 多模态 VL 视觉模型综合评估
+│   │   │   ├── eval.ts / contracts.ts / cli.ts / index.ts (包含 testEvaluationModule)
+│   │   ├── harvest/                           # Module 4: 冠军话题深度素材采集
+│   │   │   ├── harvest.ts / contracts.ts / cli.ts / index.ts (包含 testHarvestModule)
+│   │   ├── presentation/                      # Module 5: 解说视频故事板与视频渲染
+│   │   │   ├── storyboard.ts / produce.ts / video.ts / cli.ts / index.ts (包含 testPresentationModule)
+│   │   └── index.ts                           # 统一导出与 testAllModules()
+│   │
+│   ├── pipelines/                             # 【Layer 3: 流水线编排调度层】
+│   │   ├── core/                              # Pipeline、PipelineStageDef、PipelineRegistry、Context
+│   │   ├── xhot/                              # xhot 7 阶段全流程流水线
+│   │   │   ├── stages/check-env.ts            # Stage 1: 环境预检
+│   │   │   ├── execute.ts                     # Stage 1..7 调度执行引擎
+│   │   │   ├── report.ts                      # Markdown 与 JSON 报告生成
+│   │   │   ├── contracts.ts                   # 流水线选项与完整产物规范
+│   │   │   └── cli.ts                         # 流水线 CLI 入口
+│   │   └── index.ts                           # 流水线注册中心
+│   │
+│   ├── cli.ts                                 # 顶层 CLI 入口 (`xhot` 命令)
+│   └── index.ts                               # 顶层库导出入口 (utils, libs, modules, pipelines)
+└── tests/
+    ├── modules.test.ts                        # 5 个业务模块的一对一独立自测套件
+    └── xhot-pipeline.test.ts                  # xhot 全流程端到端集成测试套件
+```
 
 ---
 
@@ -53,89 +95,60 @@ WEBHOOK_TOKEN=...
 NOTIFY_TO=...
 ```
 
-若要在不同机器独立部署，只需直接创建或放置本项目的 `.env` 即可。
-
 ---
 
-## 🚀 快速上手
+## 🚀 常用命令
 
-### 1. 安装依赖
+### 1. 运行测试
 ```bash
-npm install
-```
-
-### 2. 运行测试
-```bash
+# 运行所有测试（包含 5 个模块的单模块自测与 Pipeline 完整测试）
 npm test
+
+# 仅测试 Layer 2 业务模块 (逐一自测)
+npm run test:modules
+
+# 仅测试 Layer 3 流水线
+npm run test:pipeline
 ```
 
-### 3. Dry-Run 模拟运行（不消耗网络和点数）
+### 2. 独立运行 Layer 2 业务模块
 ```bash
+# 运行模块 1: X 平台鉴权状态检查与登录
+npm run module:auth
+
+# 运行模块 2: 话题发现与候选卡片拼图
+npm run module:discovery -- "deepseek r1"
+
+# 运行模块 3: 多模态 VL 评估已有的拼图
+npm run module:evaluation -- path/to/grid.png
+
+# 运行模块 4: 对指定冠军话题深度采集推文与多媒体素材
+npm run module:harvest -- "Claude 3.7"
+
+# 运行模块 5: 渲染解说视频
+npm run module:presentation -- path/to/eval-result.json path/to/harvest-result.json
+```
+
+### 3. 运行 Layer 3 完整流水线
+```bash
+# Dry-run 仿真模式（不消耗网络和点数）
 npm run xhot -- "new model" --dry-run
-```
 
-### 4. 正式运行流水线
-```bash
 # 默认搜索 "new model"
 npm run xhot
 
 # 指定搜索话题
 npm run xhot -- "deepseek r1"
 
-# 自定义参数：抓取 12 个候选，仅筛选 48 小时内的推文，有头浏览器展示
+# 自定义参数：抓取 12 个候选，仅筛选 48 小时内的推文，显示有头浏览器
 npm run xhot -- "claude 3.7" --candidate-count 12 --max-age-hours 48 --headed
 
 # 跳过视频渲染，仅收集热点素材和评估报告
 npm run xhot -- "sora video" --skip-video
 ```
 
----
-
-## 🛠️ CLI 参数说明
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `[query]` | 搜索话题关键词 | `"new model"` |
-| `-o, --out-dir <path>` | 自定义输出产物目录 | `./artifacts/xhot-<timestamp>-<rand>/` |
-| `--candidate-count <n>`| 评估网格中的候选推文数量 | `12` |
-| `--max-age-hours <n>` | 候选推文的最大时效限制（小时） | `72` |
-| `--headed` | 显示浏览器窗口界面（用于排错或确认登录） | `false` |
-| `--headless` | 强制无头模式 | `true` |
-| `--skip-video` | 跳过最终解说视频渲染阶段 | `false` |
-| `--tts-voice <name>` | Edge-TTS 解说音色名称 | `zh-CN-YunxiNeural` |
-| `--tts-rate <rate>` | 语音语速调整（如 `+10%`, `-5%`） | `+0%` |
-| `--profile-dir <path>` | 自定义 Chromium Profile 路径 | `./.chromium-profile` |
-| `--dry-run` | 模拟各阶段流程，产出样例报告 | `false` |
-
----
-
-## 🏗️ 项目架构
-
+### 4. 编译构建
+```bash
+npm run build
 ```
-xhot/
-├── .env -> ../VideoGen/.env   # 软链接复用 .env
-├── package.json
-├── tsconfig.json
-├── tools/
-│   └── edge_tts_synth.py      # Edge-TTS Python 合成脚本
-├── src/
-│   ├── cli.ts                 # CLI 命令行入口
-│   ├── index.ts               # 模块统一导出入口
-│   ├── env.ts                 # .env 配置加载器
-│   ├── xhot/                  # XHot 核心流水线实现
-│   │   ├── auth.ts            # X 平台鉴权与登录
-│   │   ├── search.ts          # 搜索推文与卡片截图
-│   │   ├── grid.ts            # 拼图网格组装 (Sharp)
-│   │   ├── eval.ts            # 多模态 VL 顶尖评估
-│   │   ├── harvest.ts         # 冠军素材深度采集
-│   │   ├── video.ts           # 视频分镜与素材组装
-│   │   └── contracts.ts       # 数据契约定义
-│   ├── explainer/             # 解说视频生产模块
-│   ├── tutorial/              # OpusVideo Canvas 播放器与渲染器
-│   ├── browser/               # Chromium 持久化会话与 CDP 封装
-│   ├── llm/                   # 多模态 LLM 客户端
-│   ├── pipeline/              # 流水线执行调度与报告
-│   └── utils/                 # 工具库 (yt-dlp, ffmpeg, cookies, 日志)
-└── tests/
-    └── xhot-pipeline.test.ts  # 完整单测与集成测试
-```
+编译产物输出至 `dist/`，可直接作为可执行文件分发或通过 `npm link` 全局使用 `xhot` 命令。

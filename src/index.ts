@@ -1,11 +1,20 @@
-export * from './env.js';
-export * from './xhot/index.js';
-export * from './pipeline/index.js';
-export * from './explainer/index.js';
-export * from './tutorial/index.js';
-export * from './browser/launcher.js';
-export * from './browser/session.js';
-export * from './browser/types.js';
-export * from './llm/index.js';
-export * from './utils/index.js';
-export { handleXHotCommand, attachXHotOptions } from './cli.js';
+/**
+ * Xhot 3-Layer Architecture:
+ * Layer 1: Utils & Libs (Low-level foundational libraries and utilities)
+ * Layer 2: Modules (Autonomous business capability modules: auth, discovery, evaluation, harvest, presentation)
+ * Layer 3: Pipelines (End-to-end orchestration pipelines: core, xhot)
+ */
+
+// Layer 1: Utils & Libs
+export * as utils from './utils/index.js';
+export * as libs from './libs/index.js';
+
+// Layer 2: Modules
+export * as modules from './modules/index.js';
+export * from './modules/index.js';
+
+// Layer 3: Pipelines
+export * as pipelines from './pipelines/index.js';
+export * from './pipelines/index.js';
+
+export { handleXHotCommand, attachXHotOptions } from './pipelines/xhot/cli.js';

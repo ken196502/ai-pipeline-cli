@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveChromiumPath } from '../browser/installer.js';
+import { resolveChromiumPath } from '../libs/browser/installer.js';
 import { loadEnvFile } from '../env.js';
 
 /**

@@ -7,14 +7,14 @@ import {
   XHOT_STAGES,
   XHotPipelineOptionsSchema,
   executeXHotPipeline,
-} from '../src/pipeline/index.js';
+} from '../src/pipelines/index.js';
 import {
   buildXHotGrid,
   type XHotCandidate,
   XHotEvalResultSchema,
   isXLoggedIn,
   isPromotedTweet,
-} from '../src/xhot/index.js';
+} from '../src/modules/index.js';
 
 test('xhot pipeline stages are correctly defined', { timeout: 10_000 }, () => {
   assert.equal(XHOT_STAGES.length, 7);
