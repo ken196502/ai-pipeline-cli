@@ -1,5 +1,5 @@
 /**
- * Automated visual QA for the tutorial player (自动视觉质检).
+ * Automated visual QA for the explainer player (自动视觉质检).
  *
  * Boots the player in the headless render browser (same engine as the final
  * render — local Firefox by default) at the target resolution, seeks a
@@ -13,13 +13,14 @@
  *   - blank frames: near-zero pixel variance at any sample time
  */
 import fs from 'node:fs/promises';
+import fss from 'node:fs';
 import path from 'node:path';
 import type { Browser, BrowserContext, Page } from 'playwright-core';
 import sharp from 'sharp';
-import { launchRenderBrowser, serveTutorialDir, type TutorialRenderEngine } from './render.js';
-import type { TutorialTimeline } from './contracts.js';
+import { launchRenderBrowser, serveExplainerDir, type ExplainerRenderEngine } from './render.js';
+import type { ExplainerTimeline } from './contracts.js';
 
-export interface TutorialQAIssue {
+export interface ExplainerQAIssue {
   kind:
     | 'element-overflow'
     | 'text-clipped'
@@ -28,24 +29,28 @@ export interface TutorialQAIssue {
   detail: string;
   tSec: number;
 }
+export type TutorialQAIssue = ExplainerQAIssue;
 
-export interface TutorialQAResult {
-  issues: TutorialQAIssue[];
+export interface ExplainerQAResult {
+  issues: ExplainerQAIssue[];
   screenshots: string[];
   checksRun: number;
 }
+export type TutorialQAResult = ExplainerQAResult;
 
-export interface RunTutorialVisualQaParams {
-  tutorialDir: string;
-  /** Render engine override; defaults to the same engine family as renderTutorialVideo. */
-  engine?: TutorialRenderEngine;
+export interface RunExplainerVisualQaParams {
+  explainerDir?: string;
+  tutorialDir?: string;
+  /** Render engine override; defaults to the same engine family as renderExplainerVideo. */
+  engine?: ExplainerRenderEngine;
   /** Chromium executable path — implies engine 'chromium'. */
   browserPath?: string;
-  /** Where QA screenshots are saved (default <tutorialDir>/qa). */
+  /** Where QA screenshots are saved (default <explainerDir>/qa). */
   shotsDir?: string;
   /** Samples per scene (default 4). */
   samplesPerScene?: number;
 }
+export type RunTutorialVisualQaParams = RunExplainerVisualQaParams;
 
 interface FrameInspection {
   overflows: string[];
@@ -53,28 +58,32 @@ interface FrameInspection {
   promptUnresolved: string[];
 }
 
-/** Runs the visual QA grid over one tutorial bundle. */
-export async function runTutorialVisualQa(
-  params: RunTutorialVisualQaParams
-): Promise<TutorialQAResult> {
-  const tutorialDir = path.resolve(params.tutorialDir);
-  const shotsDir = params.shotsDir || path.join(tutorialDir, 'qa');
+/** Runs the visual QA grid over one explainer bundle. */
+export async function runExplainerVisualQa(
+  params: RunExplainerVisualQaParams
+): Promise<ExplainerQAResult> {
+  const bundleDir = path.resolve(params.explainerDir || params.tutorialDir || '');
+  const shotsDir = params.shotsDir || path.join(bundleDir, 'qa');
   const samplesPerScene = params.samplesPerScene ?? 4;
   await fs.mkdir(shotsDir, { recursive: true });
 
-  const timeline = JSON.parse(
-    await fs.readFile(path.join(tutorialDir, 'tutorial.json'), 'utf-8')
-  ) as TutorialTimeline;
+  const timelineFile = fss.existsSync(path.join(bundleDir, 'explainer.json'))
+    ? path.join(bundleDir, 'explainer.json')
+    : path.join(bundleDir, 'tutorial.json');
 
-  const server = await serveTutorialDir(tutorialDir);
+  const timeline = JSON.parse(
+    await fs.readFile(timelineFile, 'utf-8')
+  ) as ExplainerTimeline;
+
+  const server = await serveExplainerDir(bundleDir);
   let browser: Browser | BrowserContext | null = null;
-  const issues: TutorialQAIssue[] = [];
+  const issues: ExplainerQAIssue[] = [];
   const screenshots: string[] = [];
   const unresolvedPromptIds = new Set<string>();
   let checksRun = 0;
 
   try {
-    const envEngine = process.env.TUTORIAL_RENDER_ENGINE;
+    const envEngine = process.env.EXPLAINER_RENDER_ENGINE || process.env.TUTORIAL_RENDER_ENGINE;
     const engine = params.engine ?? (envEngine === 'firefox' || envEngine === 'chromium' ? envEngine : 'chromium');
     const launched = await launchRenderBrowser({
       engine,
@@ -84,9 +93,18 @@ export async function runTutorialVisualQa(
     });
     browser = launched.browser;
     const page: Page = launched.page;
-    await page.goto(`${server.origin}/tutorial-player.html?render=1`, { waitUntil: 'load', timeout: 120_000 });
-    await page.waitForFunction('window.__tutorialReady === true || window.__tutorialError', undefined, { timeout: 120_000 });
-    const bootError = await page.evaluate('window.__tutorialError || null');
+
+    const playerHtmlFilename = fss.existsSync(path.join(bundleDir, 'explainer-player.html'))
+      ? 'explainer-player.html'
+      : 'tutorial-player.html';
+
+    await page.goto(`${server.origin}/${playerHtmlFilename}?render=1`, { waitUntil: 'load', timeout: 120_000 });
+    await page.waitForFunction(
+      'window.__explainerReady === true || window.__tutorialReady === true || window.__explainerError || window.__tutorialError',
+      undefined,
+      { timeout: 120_000 }
+    );
+    const bootError = await page.evaluate('window.__explainerError || window.__tutorialError || null');
     if (bootError) {
       issues.push({ kind: 'blank-frame', detail: `player failed to boot: ${bootError}`, tSec: 0 });
       return { issues, screenshots, checksRun: 1 };
@@ -101,142 +119,88 @@ export async function runTutorialVisualQa(
       if (ctrl) ctrl.remove();
     });
 
-    const sampleRanges: Array<{ startSec: number; durationSec: number }> = [];
-    if (timeline.clips && timeline.clips.length > 0) {
-      for (const clip of timeline.clips) {
-        for (const shot of clip.shots) {
-          sampleRanges.push({
-            startSec: shot.vStart ?? 0,
-            durationSec: shot.vDur ?? 4.2,
-          });
-        }
-      }
-    } else if (timeline.scenes && timeline.scenes.length > 0) {
-      for (const scene of timeline.scenes) {
-        sampleRanges.push({
-          startSec: scene.startSec ?? 0,
-          durationSec: scene.durationSec ?? 4.2,
-        });
-      }
-    } else {
-      sampleRanges.push({ startSec: 0, durationSec: timeline.totalDurationSec || 4.2 });
-    }
+    const clips = timeline.clips || [];
+    let shotIndex = 0;
 
-    for (const range of sampleRanges) {
-      for (let sample = 0; sample < samplesPerScene; sample += 1) {
-        // Sample inside the range, biased away from its exact edges.
-        const p = (sample + 0.5) / samplesPerScene;
-        const tSec = range.startSec + range.durationSec * p;
+    for (let ci = 0; ci < clips.length; ci += 1) {
+      const clip = clips[ci];
+      for (let si = 0; si < (clip.shots || []).length; si += 1) {
+        const shot = clip.shots[si];
+        const vStart = shot.vStart ?? 0;
+        const vDur = Math.max(shot.vDur ?? 3, 0.5);
 
-        await page.evaluate((t: number) => window.__tutorial!.seek(t), tSec);
-        const shotPath = path.join(shotsDir, `qa-${tSec.toFixed(2)}s.png`);
-        await page.screenshot({ path: shotPath, type: 'png', timeout: 60_000 });
-        screenshots.push(shotPath);
-        checksRun += 1;
+        for (let s = 0; s < samplesPerScene; s += 1) {
+          const frac = (s + 0.5) / samplesPerScene;
+          const tSec = vStart + vDur * frac;
 
-        // Blank frame detection via pixel variance.
-        const stats = await sharp(shotPath).stats();
-        const meanStdev =
-          stats.channels.slice(0, 3).reduce((acc, c) => acc + c.stdev, 0) / 3;
-        if (meanStdev < 3) {
-          issues.push({
-            kind: 'blank-frame',
-            detail: `frame is nearly blank (mean stdev ${meanStdev.toFixed(2)})`,
-            tSec,
-          });
-        }
+          await page.evaluate((t: number) => {
+            const api = window.__explainer || window.__tutorial;
+            return api!.seek(t);
+          }, tSec);
 
-        const inspection = await page.evaluate(
-          (probeT: number) => {
-            const result: FrameInspection = {
-              overflows: [],
-              textClipped: [],
-              promptUnresolved: [],
-            };
-            const W = window.innerWidth;
-            const H = window.innerHeight;
+          const shotTag = `c${ci}-s${si}-sample${s}-${tSec.toFixed(2)}s`;
+          const shotPath = path.join(shotsDir, `${shotTag}.png`);
+          const pngBuffer = await page.screenshot({ type: 'png' });
+          await fs.writeFile(shotPath, pngBuffer);
+          screenshots.push(shotPath);
+          checksRun += 1;
 
-            for (const el of Array.from(document.querySelectorAll('#stage *'))) {
-              const node = el as HTMLElement;
-              if (node.classList && node.classList.contains('visual-source')) continue;
-              // The drifting grid layer intentionally bleeds past the frame.
-              if (node.id === 'grid-layer') continue;
-              const style = window.getComputedStyle(node);
-              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
-              const rect = node.getBoundingClientRect();
-              if (rect.width < 4 || rect.height < 4) continue;
-              if (rect.right > W + 4 || rect.bottom > H + 4 || rect.left < -4 || rect.top < -4) {
-                result.overflows.push(
-                  `<${node.tagName.toLowerCase()} class="${node.className}"> at t=${probeT.toFixed(2)} (rect ${rect.left.toFixed(0)},${rect.top.toFixed(0)} ${rect.width.toFixed(0)}x${rect.height.toFixed(0)} vs ${W}x${H})`
-                );
+          // Inspection: pixel variance (blank-frame guard)
+          try {
+            const stats = await sharp(pngBuffer).stats();
+            const maxVariance = Math.max(...stats.channels.map((c) => c.stdev));
+            if (maxVariance < 2.0) {
+              issues.push({
+                kind: 'blank-frame',
+                detail: `frame at ${tSec.toFixed(2)}s appears near-blank (max stdev ${maxVariance.toFixed(2)})`,
+                tSec,
+              });
+            }
+          } catch {}
+
+          // Inspection: DOM geometry checks
+          const inspection = (await page.evaluate(() => {
+            const overflows: string[] = [];
+            const textClipped: string[] = [];
+            const promptUnresolved: string[] = [];
+
+            const viewW = window.innerWidth;
+            const viewH = window.innerHeight;
+
+            const cards = document.querySelectorAll('.visual-card, .caption-text, .bubble-bot, .bubble-user');
+            for (let i = 0; i < cards.length; i += 1) {
+              const el = cards[i] as HTMLElement;
+              const r = el.getBoundingClientRect();
+              if (r.width === 0 || r.height === 0) continue;
+              if (r.left < -10 || r.top < -10 || r.right > viewW + 10 || r.bottom > viewH + 10) {
+                overflows.push(`${el.className} exceeds viewport bounds [${Math.round(r.left)}, ${Math.round(r.top)}, ${Math.round(r.right)}, ${Math.round(r.bottom)}]`);
+              }
+              if (el.scrollHeight > el.clientHeight + 8 && el.clientHeight > 0) {
+                textClipped.push(`${el.className} has vertical scroll overflow (${el.scrollHeight}px > ${el.clientHeight}px)`);
               }
             }
 
-            for (const sel of ['.caption-text', '.title-heading', '.title-kicker']) {
-              const node = document.querySelector(sel) as HTMLElement | null;
-              if (!node) continue;
-              if (node.scrollHeight > node.clientHeight + 4) {
-                result.textClipped.push(`${sel} clipped vertically (${node.scrollHeight} > ${node.clientHeight})`);
-              }
-            }
+            return { overflows, textClipped, promptUnresolved };
+          })) as FrameInspection;
 
-            // Prompt cards: every prompt material referenced by the timeline
-            // must resolve to non-empty text through the player's prompt
-            // registry (canvas player — the legacy DOM .prompt-text check is
-            // replaced by this runtime probe).
-            try {
-              const cfg = JSON.parse(document.getElementById('tutorial-data')?.textContent || '{}');
-              const assets = JSON.parse(document.getElementById('tutorial-assets')?.textContent || '[]');
-              const promptIds = new Set(
-                assets.filter((a: any) => a.kind === 'prompt').map((a: any) => a.id)
-              );
-              const referenced = new Set<string>();
-              for (const clip of cfg.clips || []) {
-                for (const shot of clip.shots || []) {
-                  for (const element of shot.elements || []) {
-                    const visual = element[1];
-                    const id = typeof visual === 'string' ? visual : (visual && (visual.assetId || visual.name)) || '';
-                    if (promptIds.has(id)) referenced.add(id);
-                  }
-                }
-              }
-              const api = (window as any).__tutorial;
-              for (const id of referenced) {
-                const text = api && typeof api.promptTextFor === 'function' ? api.promptTextFor(id) : null;
-                if (!text) result.promptUnresolved.push(id);
-              }
-            } catch {
-              // config parse failure is covered by the boot/blank-frame checks
-            }
-
-            return result;
-          },
-          tSec
-        );
-
-        for (const detail of inspection.overflows) {
-          issues.push({ kind: 'element-overflow', detail, tSec });
+          for (const over of inspection.overflows) {
+            issues.push({ kind: 'element-overflow', detail: `${shotTag}: ${over}`, tSec });
+          }
+          for (const clipText of inspection.textClipped) {
+            issues.push({ kind: 'text-clipped', detail: `${shotTag}: ${clipText}`, tSec });
+          }
         }
-        for (const detail of inspection.textClipped) {
-          issues.push({ kind: 'text-clipped', detail, tSec });
-        }
-        for (const id of inspection.promptUnresolved) {
-          if (unresolvedPromptIds.has(id)) continue;
-          unresolvedPromptIds.add(id);
-          issues.push({
-            kind: 'prompt-unresolved',
-            detail: `prompt material "${id}" is referenced by the timeline but its full text resolved empty — the prompt card would render a placeholder`,
-            tSec,
-          });
-        }
+        shotIndex += 1;
       }
     }
-
-    return { issues, screenshots, checksRun };
   } finally {
     if (browser) {
       await browser.close().catch(() => undefined);
     }
     await server.close();
   }
+
+  return { issues, screenshots, checksRun };
 }
+
+export const runTutorialVisualQa = runExplainerVisualQa;

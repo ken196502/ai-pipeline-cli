@@ -1,9 +1,9 @@
 /**
- * Contracts and Zod schemas for AI commentary / tutorial video generation
+ * Contracts and Zod schemas for AI commentary / explainer video generation
  * based on the OpusVideo procedural canvas engine.
  *
  * Data hierarchy:
- *   TutorialStoryboard / Config
+ *   ExplainerStoryboard / Config
  *     └── meta: design { w, h }, bg, accent, font, shotDur, shotTrans, clipTrans
  *     └── clips[]: chapters (e.g. 00 · HOOK, 01 · STEP 1, 02 · STEP 2...)
  *           └── kicker, title, subtitle, bg
@@ -22,16 +22,19 @@
  */
 import { z } from 'zod';
 
-export const TUTORIAL_STORYBOARD_VERSION = '2.0.0';
+export const EXPLAINER_STORYBOARD_VERSION = '2.0.0';
+export const TUTORIAL_STORYBOARD_VERSION = EXPLAINER_STORYBOARD_VERSION;
 
-export const TutorialAssetKindSchema = z.enum(['video', 'image', 'prompt']);
-export type TutorialAssetKind = z.infer<typeof TutorialAssetKindSchema>;
+export const ExplainerAssetKindSchema = z.enum(['video', 'image', 'prompt']);
+export type ExplainerAssetKind = z.infer<typeof ExplainerAssetKindSchema>;
+export const TutorialAssetKindSchema = ExplainerAssetKindSchema;
+export type TutorialAssetKind = ExplainerAssetKind;
 
-export const TutorialAssetSchema = z.object({
+export const ExplainerAssetSchema = z.object({
   id: z.string().min(1),
-  kind: TutorialAssetKindSchema,
+  kind: ExplainerAssetKindSchema,
   label: z.string().default(''),
-  /** Relative source path inside the tutorial bundle (video / image only). */
+  /** Relative source path inside the explainer bundle (video / image only). */
   src: z.string().optional(),
   /** Absolute path of the source file on disk (video / image only). */
   sourcePath: z.string().optional(),
@@ -45,23 +48,27 @@ export const TutorialAssetSchema = z.object({
   width: z.number().int().positive().optional(),
   height: z.number().int().positive().optional(),
 });
-export type TutorialAsset = z.infer<typeof TutorialAssetSchema>;
+export type ExplainerAsset = z.infer<typeof ExplainerAssetSchema>;
+export const TutorialAssetSchema = ExplainerAssetSchema;
+export type TutorialAsset = ExplainerAsset;
 
 // ==========================================
 // OpusVideo Meta & Design
 // ==========================================
 
-export const TutorialMetaDesignSchema = z.object({
+export const ExplainerMetaDesignSchema = z.object({
   w: z.number().int().positive().default(1920),
   h: z.number().int().positive().default(1080),
 });
-export type TutorialMetaDesign = z.infer<typeof TutorialMetaDesignSchema>;
+export type ExplainerMetaDesign = z.infer<typeof ExplainerMetaDesignSchema>;
+export const TutorialMetaDesignSchema = ExplainerMetaDesignSchema;
+export type TutorialMetaDesign = ExplainerMetaDesign;
 
-export const TutorialMetaSchema = z.object({
-  title: z.string().default('AI Tutorial Video'),
+export const ExplainerMetaSchema = z.object({
+  title: z.string().default('AI Explainer Video'),
   subtitle: z.string().optional(),
   subtitles: z.boolean().default(false),
-  design: TutorialMetaDesignSchema.default({ w: 1920, h: 1080 }),
+  design: ExplainerMetaDesignSchema.default({ w: 1920, h: 1080 }),
   bg: z.string().default('#0A0A0B'),
   accent: z.string().default('#FF4D12'),
   font: z.string().default('Inter, "Segoe UI", system-ui, -apple-system, sans-serif'),
@@ -69,19 +76,23 @@ export const TutorialMetaSchema = z.object({
   shotTrans: z.number().positive().default(0.8),
   clipTrans: z.number().positive().default(1.0),
 });
-export type TutorialMeta = z.infer<typeof TutorialMetaSchema>;
+export type ExplainerMeta = z.infer<typeof ExplainerMetaSchema>;
+export const TutorialMetaSchema = ExplainerMetaSchema;
+export type TutorialMeta = ExplainerMeta;
 
 // ==========================================
 // 2D Affine Camera
 // ==========================================
 
-export const TutorialCameraSchema = z.object({
+export const ExplainerCameraSchema = z.object({
   zoom: z.number().default(1),
   x: z.number().default(0),
   y: z.number().default(0),
   roll: z.number().default(0),
 });
-export type TutorialCamera = z.infer<typeof TutorialCameraSchema>;
+export type ExplainerCamera = z.infer<typeof ExplainerCameraSchema>;
+export const TutorialCameraSchema = ExplainerCameraSchema;
+export type TutorialCamera = ExplainerCamera;
 
 // ==========================================
 // Visual References: Video, Screenshot/Image, Icon, Chart
@@ -91,7 +102,7 @@ export const CHART_TYPES = ['bars', 'line', 'donut'] as const;
 export const ChartTypeSchema = z.enum(CHART_TYPES);
 export type ChartType = z.infer<typeof ChartTypeSchema>;
 
-export const TutorialVisualDescriptorSchema = z.object({
+export const ExplainerVisualDescriptorSchema = z.object({
   kind: z.enum(['video', 'image', 'icon', 'chart']),
   assetId: z.string().optional(),
   name: z.string().optional(),
@@ -106,30 +117,36 @@ export const TutorialVisualDescriptorSchema = z.object({
   botName: z.string().optional(),
   stage: z.enum(['image-prompt', 'video-prompt', 'storyboard']).optional(),
 });
-export type TutorialVisualDescriptor = z.infer<typeof TutorialVisualDescriptorSchema>;
+export type ExplainerVisualDescriptor = z.infer<typeof ExplainerVisualDescriptorSchema>;
+export const TutorialVisualDescriptorSchema = ExplainerVisualDescriptorSchema;
+export type TutorialVisualDescriptor = ExplainerVisualDescriptor;
 
-export const TutorialVisualRefSchema = z.union([
+export const ExplainerVisualRefSchema = z.union([
   z.string().min(1),
-  TutorialVisualDescriptorSchema,
+  ExplainerVisualDescriptorSchema,
 ]);
-export type TutorialVisualRef = z.infer<typeof TutorialVisualRefSchema>;
+export type ExplainerVisualRef = z.infer<typeof ExplainerVisualRefSchema>;
+export const TutorialVisualRefSchema = ExplainerVisualRefSchema;
+export type TutorialVisualRef = ExplainerVisualRef;
 
 // Element: [phraseText, visualRef]
-export const TutorialElementSchema = z.tuple([
+export const ExplainerElementSchema = z.tuple([
   z.string().min(1),
-  TutorialVisualRefSchema,
+  ExplainerVisualRefSchema,
 ]);
-export type TutorialElement = z.infer<typeof TutorialElementSchema>;
+export type ExplainerElement = z.infer<typeof ExplainerElementSchema>;
+export const TutorialElementSchema = ExplainerElementSchema;
+export type TutorialElement = ExplainerElement;
 
 // ==========================================
 // Shot & Clip
 // ==========================================
 
-export const TutorialShotSchema = z.object({
+export const ExplainerShotSchema = z.object({
   id: z.string().min(1),
-  elements: z.array(TutorialElementSchema).min(1),
+  elements: z.array(ExplainerElementSchema).min(1),
   narration: z.array(z.string().min(1)).min(1),
-  camera: TutorialCameraSchema.optional(),
+  camera: ExplainerCameraSchema.optional(),
   /** Timeline computed start time (seconds). */
   vStart: z.number().optional(),
   /** Timeline computed duration (seconds). */
@@ -137,95 +154,108 @@ export const TutorialShotSchema = z.object({
   /** Timeline computed line timings. */
   vLines: z.array(z.any()).optional(),
 });
-export type TutorialShot = z.infer<typeof TutorialShotSchema>;
+export type ExplainerShot = z.infer<typeof ExplainerShotSchema>;
+export const TutorialShotSchema = ExplainerShotSchema;
+export type TutorialShot = ExplainerShot;
 
-export const TutorialClipSchema = z.object({
+export const ExplainerClipSchema = z.object({
   id: z.string().min(1),
   kicker: z.string().optional(),
   title: z.string().min(1),
   subtitle: z.string().optional(),
   bg: z.string().default('#0A0A0B'),
-  shots: z.array(TutorialShotSchema).min(1),
+  shots: z.array(ExplainerShotSchema).min(1),
   /** Timeline computed start time (seconds). */
   vStart: z.number().optional(),
   /** Timeline computed duration (seconds). */
   vDur: z.number().optional(),
 });
-export type TutorialClip = z.infer<typeof TutorialClipSchema>;
+export type ExplainerClip = z.infer<typeof ExplainerClipSchema>;
+export const TutorialClipSchema = ExplainerClipSchema;
+export type TutorialClip = ExplainerClip;
 
 // ==========================================
 // Storyboard
 // ==========================================
 
-export const TutorialStoryboardSchema = z.object({
-  version: z.string().default(TUTORIAL_STORYBOARD_VERSION),
+export const ExplainerStoryboardSchema = z.object({
+  version: z.string().default(EXPLAINER_STORYBOARD_VERSION),
   runId: z.string().default(''),
   videoId: z.string().default(''),
   topic: z.string().default(''),
   title: z.string().default(''),
   narrationLanguage: z.string().default('en'),
-  meta: TutorialMetaSchema.default({}),
-  clips: z.array(TutorialClipSchema).min(1),
+  meta: ExplainerMetaSchema.default({}),
+  clips: z.array(ExplainerClipSchema).min(1),
   model: z.string().optional(),
   /** Backwards compatibility for scenes property if accessed. */
   scenes: z.array(z.any()).optional(),
 });
-export type TutorialStoryboard = z.infer<typeof TutorialStoryboardSchema>;
+export type ExplainerStoryboard = z.infer<typeof ExplainerStoryboardSchema>;
+export const TutorialStoryboardSchema = ExplainerStoryboardSchema;
+export type TutorialStoryboard = ExplainerStoryboard;
 
 // ==========================================
 // Voice & Word-Boundary Alignment
 // ==========================================
 
-export const TutorialWordSchema = z.object({
+export const ExplainerWordSchema = z.object({
   word: z.string(),
   t0: z.number().nonnegative(),
   t1: z.number().nonnegative(),
 });
-export type TutorialWord = z.infer<typeof TutorialWordSchema>;
+export type ExplainerWord = z.infer<typeof ExplainerWordSchema>;
+export const TutorialWordSchema = ExplainerWordSchema;
+export type TutorialWord = ExplainerWord;
 
-export interface TutorialVoiceWord {
+export interface ExplainerVoiceWord {
   word: string;
   t0: number;
   t1: number;
 }
+export type TutorialVoiceWord = ExplainerVoiceWord;
 
-export interface TutorialVoiceLine {
+export interface ExplainerVoiceLine {
   text: string;
-  icon: string | TutorialVisualRef;
+  icon: string | ExplainerVisualRef;
   aStart: number;
   aDur: number;
   chars?: Array<{ c: string; t: number }>;
-  words?: TutorialVoiceWord[];
+  words?: ExplainerVoiceWord[];
 }
+export type TutorialVoiceLine = ExplainerVoiceLine;
 
-export interface TutorialVoiceShot {
+export interface ExplainerVoiceShot {
   start: number;
   dur: number;
-  lines: TutorialVoiceLine[];
+  lines: ExplainerVoiceLine[];
 }
+export type TutorialVoiceShot = ExplainerVoiceShot;
 
-export interface TutorialVoiceClip {
+export interface ExplainerVoiceClip {
   start: number;
   dur: number;
-  shots: TutorialVoiceShot[];
+  shots: ExplainerVoiceShot[];
 }
+export type TutorialVoiceClip = ExplainerVoiceClip;
 
-export interface TutorialVoiceData {
+export interface ExplainerVoiceData {
   voice: string;
   total: number;
   titleSafe: number;
   clipTail: number;
   lineGap: number;
   shotGap: number;
-  clips: TutorialVoiceClip[];
+  clips: ExplainerVoiceClip[];
 }
+export type TutorialVoiceData = ExplainerVoiceData;
 
 // ==========================================
 // Timeline
 // ==========================================
 
-export const TutorialTimelineSchema = z.object({
-  version: z.string().default(TUTORIAL_STORYBOARD_VERSION),
+export const ExplainerTimelineSchema = z.object({
+  version: z.string().default(EXPLAINER_STORYBOARD_VERSION),
   runId: z.string().default(''),
   videoId: z.string().default(''),
   topic: z.string().default(''),
@@ -238,14 +268,16 @@ export const TutorialTimelineSchema = z.object({
   fps: z.number().int().positive(),
   totalDurationSec: z.number().positive(),
   audioSrc: z.string().default('assets/narration.mp3'),
-  meta: TutorialMetaSchema.default({}),
-  assets: z.array(TutorialAssetSchema).default([]),
-  clips: z.array(TutorialClipSchema).default([]),
-  voice: z.custom<TutorialVoiceData>().optional(),
+  meta: ExplainerMetaSchema.default({}),
+  assets: z.array(ExplainerAssetSchema).default([]),
+  clips: z.array(ExplainerClipSchema).default([]),
+  voice: z.custom<ExplainerVoiceData>().optional(),
   /** Backward compatibility scenes array. */
   scenes: z.array(z.any()).optional(),
 });
-export type TutorialTimeline = z.infer<typeof TutorialTimelineSchema>;
+export type ExplainerTimeline = z.infer<typeof ExplainerTimelineSchema>;
+export const TutorialTimelineSchema = ExplainerTimelineSchema;
+export type TutorialTimeline = ExplainerTimeline;
 
 // ==========================================
 // Visual Reference Resolution Helper
@@ -255,7 +287,7 @@ export interface ResolvedVisual {
   kind: 'video' | 'image' | 'chart' | 'icon';
   id: string;
   label?: string;
-  asset?: TutorialAsset;
+  asset?: ExplainerAsset;
   chartType?: ChartType;
   iconName?: string;
   data?: number[];
@@ -263,8 +295,8 @@ export interface ResolvedVisual {
 }
 
 export function resolveVisualRef(
-  ref: TutorialVisualRef,
-  assets?: readonly TutorialAsset[]
+  ref: ExplainerVisualRef,
+  assets?: readonly ExplainerAsset[]
 ): ResolvedVisual {
   const assetMap = new Map((assets || []).map((a) => [a.id, a]));
 
@@ -317,13 +349,13 @@ export function resolveVisualRef(
 // Schema Builder with Material / Icon Binding
 // ==========================================
 
-export function buildTutorialStoryboardSchema(params: {
+export function buildExplainerStoryboardSchema(params: {
   assetIds: ReadonlySet<string>;
   iconNames: ReadonlySet<string>;
-}): z.ZodType<TutorialStoryboard, z.ZodTypeDef, unknown> {
+}): z.ZodType<ExplainerStoryboard, z.ZodTypeDef, unknown> {
   const chartSet = new Set<string>(CHART_TYPES);
 
-  const visualRefined = TutorialVisualRefSchema.superRefine((val, ctx) => {
+  const visualRefined = ExplainerVisualRefSchema.superRefine((val, ctx) => {
     if (typeof val === 'string') {
       if (chartSet.has(val) || params.assetIds.has(val) || params.iconNames.has(val)) {
         return;
@@ -381,11 +413,10 @@ export function buildTutorialStoryboardSchema(params: {
       id: z.string().min(1),
       elements: z.array(elementSchema).min(1, 'shot must carry at least 1 element'),
       narration: z.array(z.string().min(1)).min(1, 'shot must carry spoken narration matching elements'),
-      camera: TutorialCameraSchema.optional(),
+      camera: ExplainerCameraSchema.optional(),
     })
     .passthrough()
     .superRefine((shot, ctx) => {
-      // Rejects any forbidden duration/timing fields in the raw script
       const raw = shot as any;
       for (const banned of ['duration', 'durationSec', 'minDurationSec', 'startSec', 'endSec']) {
         if (raw[banned] !== undefined) {
@@ -421,18 +452,19 @@ export function buildTutorialStoryboardSchema(params: {
       }
     });
 
-  return TutorialStoryboardSchema.extend({
+  return ExplainerStoryboardSchema.extend({
     clips: z.array(clipSchema).min(1, 'storyboard must carry at least 1 clip'),
-  }) as z.ZodType<TutorialStoryboard, z.ZodTypeDef, unknown>;
+  }) as z.ZodType<ExplainerStoryboard, z.ZodTypeDef, unknown>;
 }
+export const buildTutorialStoryboardSchema = buildExplainerStoryboardSchema;
 
 // ==========================================
 // Coverage & Validation Checks
 // ==========================================
 
 export function collectStoryboardCoverageErrors(
-  storyboard: TutorialStoryboard,
-  materials?: readonly TutorialAsset[]
+  storyboard: ExplainerStoryboard,
+  materials?: readonly ExplainerAsset[]
 ): string[] {
   const errors: string[] = [];
   if (!materials || materials.length === 0) return errors;
@@ -452,7 +484,7 @@ export function collectStoryboardCoverageErrors(
     }
   }
 
-  // 1. Browser operation step screenshots coverage: at least one real UI screenshot must appear!
+  // 1. Browser operation step screenshots coverage
   const browserSteps = materials.filter((m) => m.kind === 'image' && m.derivedFrom === 'browser-step');
   if (browserSteps.length > 0) {
     const shownBrowserSteps = browserSteps.filter((m) => used.has(m.id));
@@ -460,16 +492,13 @@ export function collectStoryboardCoverageErrors(
       errors.push(
         `visual coverage: at least one browser operation step screenshot (${browserSteps
           .map((m) => m.id)
-          .join(', ')}) must appear in the tutorial material`
+          .join(', ')}) must appear in the explainer material`
       );
     }
   }
 
-  // 2. Prompt materials coverage (提示词卡片): every clip that owns prompt
-  //    materials must showcase at least one of them so the tutorial actually
-  //    displays the generation prompts. Prompt assets are grouped by their
-  //    originating clipIndex (vl-prompt-* carry no clipIndex and are exempt).
-  const promptGroups = new Map<number, TutorialAsset[]>();
+  // 2. Prompt materials coverage
+  const promptGroups = new Map<number, ExplainerAsset[]>();
   for (const material of materials) {
     if (material.kind === 'prompt' && material.clipIndex != null) {
       const group = promptGroups.get(material.clipIndex) || [];
@@ -483,14 +512,13 @@ export function collectStoryboardCoverageErrors(
       errors.push(
         `visual coverage: clip ${clipIndex} prompt material(s) ${group
           .map((material) => material.id)
-          .join(', ')} never shown — the tutorial must display the actual generation prompts (auto-scrolling prompt cards) when explaining how that clip was made`
+          .join(', ')} never shown — the explainer must display the actual generation prompts`
       );
     }
   }
 
-  // 3. Generated clips coverage: every generated clip must appear at least once
-  // (either via its generated video, or via its start/end keyframe image).
-  const clipGroups = new Map<number, TutorialAsset[]>();
+  // 3. Generated clips coverage
+  const clipGroups = new Map<number, ExplainerAsset[]>();
   for (const material of materials) {
     if ((material.kind === 'video' || material.kind === 'image') && material.clipIndex != null) {
       const group = clipGroups.get(material.clipIndex) || [];
@@ -509,22 +537,14 @@ export function collectStoryboardCoverageErrors(
     errors.push(
       `visual coverage: generated clip(s) ${unshownClips
         .map((c) => `clip-${String(c).padStart(3, '0')}`)
-        .join(', ')} never shown — every generated clip must appear at least once across the scenes (the tutorial showcases the multi-clip output)`
-    );
-  }
-
-  // 4. Final AI video showcase check (教程最后展示成片)
-  const finalAiVideo = materials.find((m) => m.id === 'final-ai-video');
-  if (finalAiVideo && !used.has('final-ai-video') && totalVisualSlots >= 3) {
-    errors.push(
-      'visual coverage: "final-ai-video" must be showcased in the final chapter of the tutorial (教程最后必须展示成片)'
+        .join(', ')} never shown — every generated clip must appear at least once across the scenes`
     );
   }
 
   return errors;
 }
 
-export function collectStoryboardDisplayErrors(storyboard: TutorialStoryboard): string[] {
+export function collectStoryboardDisplayErrors(storyboard: ExplainerStoryboard): string[] {
   const errors: string[] = [];
   const ARROW_PATTERN = /->|=>|→/;
 
@@ -545,8 +565,8 @@ export function collectStoryboardDisplayErrors(storyboard: TutorialStoryboard): 
 }
 
 export function collectStoryboardRefErrors(
-  storyboard: TutorialStoryboard,
-  materials?: readonly TutorialAsset[]
+  storyboard: ExplainerStoryboard,
+  materials?: readonly ExplainerAsset[]
 ): string[] {
   const errors: string[] = [];
   if (!materials) return errors;
@@ -572,9 +592,9 @@ export function collectStoryboardRefErrors(
 // ==========================================
 
 export function resolveChatbotPrompts(
-  storyboard: TutorialStoryboard,
-  assets: readonly TutorialAsset[]
-): TutorialStoryboard {
+  storyboard: ExplainerStoryboard,
+  assets: readonly ExplainerAsset[]
+): ExplainerStoryboard {
   const promptMap = new Map(
     assets.filter((a) => a.kind === 'prompt' && a.promptText).map((a) => [a.id, a.promptText!])
   );
@@ -637,7 +657,7 @@ export function clampSceneColumnWidths<T extends { widthPercent: number }>(
 
 export const PHRASE_GAP_SEC = 0.3;
 
-export function firstPhraseEnd(words: readonly TutorialWord[], minGapSec = PHRASE_GAP_SEC): number | null {
+export function firstPhraseEnd(words: readonly ExplainerWord[], minGapSec = PHRASE_GAP_SEC): number | null {
   if (words.length === 0) return null;
   for (let i = 1; i < words.length; i += 1) {
     if (words[i].t0 - words[i - 1].t1 >= minGapSec) return words[i - 1].t1;
@@ -645,7 +665,7 @@ export function firstPhraseEnd(words: readonly TutorialWord[], minGapSec = PHRAS
   return words[Math.min(2, words.length - 1)].t1;
 }
 
-export function lastPhraseStart(words: readonly TutorialWord[], minGapSec = PHRASE_GAP_SEC): number | null {
+export function lastPhraseStart(words: readonly ExplainerWord[], minGapSec = PHRASE_GAP_SEC): number | null {
   if (words.length === 0) return null;
   for (let i = words.length - 1; i >= 1; i -= 1) {
     if (words[i].t0 - words[i - 1].t1 >= minGapSec) return words[i].t0;
@@ -654,7 +674,7 @@ export function lastPhraseStart(words: readonly TutorialWord[], minGapSec = PHRA
 }
 
 export function sceneDurationFromWords(
-  words: readonly TutorialWord[],
+  words: readonly ExplainerWord[],
   fallbackSec: number,
   fps: number
 ): number {
@@ -664,7 +684,7 @@ export function sceneDurationFromWords(
 }
 
 export const SubtitleChunkSchema = z.object({
-  words: z.array(TutorialWordSchema),
+  words: z.array(ExplainerWordSchema),
   t0: z.number().nonnegative(),
   t1: z.number().positive(),
 });
@@ -675,11 +695,11 @@ export const SUBTITLE_CHUNK_MAX_CHARS = 20;
 const SENTENCE_END = /[。！？!?；;，,、…]$/;
 
 export function buildSubtitleChunks(
-  words: readonly TutorialWord[],
+  words: readonly ExplainerWord[],
   maxChars = SUBTITLE_CHUNK_MAX_CHARS
 ): SubtitleChunk[] {
   const chunks: SubtitleChunk[] = [];
-  let current: TutorialWord[] = [];
+  let current: ExplainerWord[] = [];
   let chars = 0;
 
   const flush = () => {
@@ -708,7 +728,7 @@ export function buildSubtitleChunks(
   return chunks;
 }
 
-export interface TutorialGenerationSummary {
+export interface ExplainerVideoSummary {
   status: 'completed' | 'failed';
   sceneCount: number;
   totalDurationSec: number;
@@ -749,6 +769,13 @@ export interface TutorialGenerationSummary {
     }>;
   }>;
 }
+export type TutorialGenerationSummary = ExplainerVideoSummary;
+export type ExplainerGenerationSummary = ExplainerVideoSummary;
+
+export type ExplainerRenderScene = any;
+export type ExplainerScene = any;
+export type ExplainerVisual = any;
+export type ExplainerTitleCard = any;
 
 export type TutorialRenderScene = any;
 export type TutorialScene = any;

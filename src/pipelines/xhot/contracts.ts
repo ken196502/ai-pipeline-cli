@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { PipelineStageDef, StageResult } from '../core/contracts.js';
 import type { XHotTopCandidate } from '../../modules/evaluation/contracts.js';
 import type { XHotHarvestResult } from '../../modules/harvest/contracts.js';
-import type { TutorialGenerationSummary } from '../../libs/player/contracts.js';
+import type { ExplainerVideoSummary } from '../../libs/player/contracts.js';
 
 export const XHotPipelineOptionsSchema = z.object({
   query: z.string().min(1, 'Query keyword is required'),
@@ -14,9 +14,13 @@ export const XHotPipelineOptionsSchema = z.object({
   headed: z.boolean().default(false),
   headless: z.boolean().default(true),
   skipVideo: z.boolean().default(false),
-  tutorialEngine: z.enum(['firefox', 'chromium']).default('chromium'),
-  tutorialFps: z.number().int().min(10).max(60).default(30),
-  tutorialSubtitles: z.boolean().default(false),
+  explainerEngine: z.enum(['firefox', 'chromium']).default('chromium'),
+  explainerFps: z.number().int().min(10).max(60).default(30),
+  explainerSubtitles: z.boolean().default(false),
+  // Backward compatibility options
+  tutorialEngine: z.enum(['firefox', 'chromium']).optional(),
+  tutorialFps: z.number().int().min(10).max(60).optional(),
+  tutorialSubtitles: z.boolean().optional(),
   ttsVoice: z.string().optional(),
   ttsRate: z.string().default('+0%'),
   dryRun: z.boolean().default(false),
@@ -29,7 +33,7 @@ export const XHOT_STAGES: PipelineStageDef[] = [
   { id: 'x-search-grid', name: 'Topic Search & Grid', description: 'Search X topic, collect candidate cards and build NxN grid' },
   { id: 'x-eval', name: 'VL Top 3 Evaluation', description: 'Evaluate candidates with Vision-Language model and pick top 3 & winner' },
   { id: 'x-harvest', name: 'Harvest Winner Materials', description: 'Deep search winner name and harvest tweets, images & videos' },
-  { id: 'x-video', name: 'Presentation Video', description: 'Generate storyboard, TTS narration, and render presentation video', optional: true },
+  { id: 'x-video', name: 'Explainer Video', description: 'Generate storyboard, TTS narration, and render explainer video', optional: true },
   { id: 'report', name: 'Generate Reports', description: 'Compile Markdown and JSON pipeline reports' },
 ];
 
@@ -59,7 +63,8 @@ export interface XHotFullResult {
   topCandidates?: XHotTopCandidate[];
   gridImagePath?: string;
   harvestResult?: XHotHarvestResult;
-  tutorial?: TutorialGenerationSummary;
+  explainer?: ExplainerVideoSummary;
+  tutorial?: ExplainerVideoSummary;
   stages: Record<string, StageResult>;
   envCheck?: EnvCheckSummary;
 }

@@ -1,9 +1,9 @@
 /**
- * Headless frame-by-frame rendering of the tutorial player.
+ * Headless frame-by-frame rendering of the explainer player.
  *
- * A local static server hosts the tutorial bundle, a headless browser opens the
+ * A local static server hosts the explainer bundle, a headless browser opens the
  * player in render mode, and every frame is painted deterministically via
- * `window.__tutorial.seek(t)` and captured as a PNG streamed into ffmpeg's
+ * `window.__explainer.seek(t)` and captured as a PNG streamed into ffmpeg's
  * image2pipe encoder. The encoded silent video is then muxed with the edge-tts
  * narration track.
  *
@@ -17,7 +17,7 @@
  *     `browserPath` (or the auto-detected path), matching the legacy behavior.
  *
  * The engine is explicit — there is no silent cross-engine fallback. Set
- * `TUTORIAL_RENDER_ENGINE=chromium` (or pass `engine`) to leave Firefox.
+ * `EXPLAINER_RENDER_ENGINE=chromium` (or pass `engine`) to leave Firefox.
  */
 import http from 'node:http';
 import fs from 'node:fs';
@@ -32,10 +32,14 @@ import { resolveChromiumPath } from '../browser/installer.js';
 const execFileAsync = promisify(execFile);
 
 /** Engines supported by the final render stage. */
-export type TutorialRenderEngine = 'firefox' | 'chromium';
+export type ExplainerRenderEngine = 'firefox' | 'chromium';
+export type TutorialRenderEngine = ExplainerRenderEngine;
 
 declare global {
   interface Window {
+    __explainer?: { seek(t: number): Promise<void> };
+    __explainerReady?: boolean;
+    __explainerError?: string;
     __tutorial?: { seek(t: number): Promise<void> };
     __tutorialReady?: boolean;
     __tutorialError?: string;
@@ -70,26 +74,33 @@ const CONTENT_TYPES: Readonly<Record<string, string>> = {
  *
  * Ubuntu ships Firefox as a strictly-confined snap that can only read profiles
  * inside its own data dir; a profile anywhere else fails launch with
- * "Could not find profile folder". Override with TUTORIAL_RENDER_FIREFOX_PROFILE.
+ * "Could not find profile folder". Override with EXPLAINER_RENDER_FIREFOX_PROFILE.
  */
 export function resolveFirefoxRenderProfileDir(): string {
-  const override = process.env.TUTORIAL_RENDER_FIREFOX_PROFILE;
+  const override = process.env.EXPLAINER_RENDER_FIREFOX_PROFILE || process.env.TUTORIAL_RENDER_FIREFOX_PROFILE;
   if (override) {
     return path.resolve(override);
   }
   const snapCommon = path.join(os.homedir(), 'snap', 'firefox', 'common');
   if (fs.existsSync(snapCommon)) {
-    return path.join(snapCommon, 'videgen-render', 'profile');
+    return path.join(snapCommon, 'xhot-render', 'profile');
   }
-  return path.join(os.tmpdir(), 'videgen-render-firefox-profile');
+  return path.join(os.tmpdir(), 'xhot-render-firefox-profile');
 }
 
-/** Minimal static file server used to host the tutorial bundle for the player. */
-export async function serveTutorialDir(dir: string): Promise<StaticServer> {
+/** Minimal static file server used to host the explainer bundle for the player. */
+export async function serveExplainerDir(dir: string): Promise<StaticServer> {
   const root = path.resolve(dir);
   const server = http.createServer((req, res) => {
     const requestPath = decodeURIComponent((req.url || '/').split('?')[0]);
-    const rel = requestPath === '/' ? 'tutorial-player.html' : requestPath.replace(/^\/+/, '');
+    let rel = requestPath.replace(/^\/+/, '');
+    if (rel === '') {
+      if (fs.existsSync(path.join(root, 'explainer-player.html'))) {
+        rel = 'explainer-player.html';
+      } else {
+        rel = 'tutorial-player.html';
+      }
+    }
     const filePath = path.join(root, rel);
 
     if (!filePath.startsWith(root) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
@@ -128,7 +139,7 @@ export async function serveTutorialDir(dir: string): Promise<StaticServer> {
 
   const address = server.address();
   if (!address || typeof address === 'string') {
-    throw new Error('failed to bind tutorial static server');
+    throw new Error('failed to bind explainer static server');
   }
 
   return {
@@ -139,9 +150,10 @@ export async function serveTutorialDir(dir: string): Promise<StaticServer> {
       }),
   };
 }
+export const serveTutorialDir = serveExplainerDir;
 
 export interface LaunchRenderBrowserParams {
-  engine?: TutorialRenderEngine;
+  engine?: ExplainerRenderEngine;
   browserPath?: string;
   width: number;
   height: number;
@@ -151,7 +163,7 @@ export interface LaunchRenderBrowserParams {
 export interface LaunchRenderBrowserResult {
   browser: Browser | BrowserContext;
   page: Page;
-  engine: TutorialRenderEngine;
+  engine: ExplainerRenderEngine;
   executablePath: string;
 }
 
@@ -159,22 +171,20 @@ export interface LaunchRenderBrowserResult {
  * Launches the render browser for the final video rendering stage.
  *
  * Defaults to the LOCAL Firefox (`engine: 'firefox'`, overridable via
- * TUTORIAL_RENDER_ENGINE). Pass `engine: 'chromium'` (with an optional
+ * EXPLAINER_RENDER_ENGINE). Pass `engine: 'chromium'` (with an optional
  * `browserPath`) for the legacy Chromium path. Failures surface loudly on the
  * requested engine — never a silent engine switch.
  */
 export async function launchRenderBrowser(
   params: LaunchRenderBrowserParams
 ): Promise<LaunchRenderBrowserResult> {
-  const envEngine = process.env.TUTORIAL_RENDER_ENGINE;
+  const envEngine = process.env.EXPLAINER_RENDER_ENGINE || process.env.TUTORIAL_RENDER_ENGINE;
   const explicitEngine =
     params.engine ?? (envEngine === 'firefox' || envEngine === 'chromium' ? envEngine : undefined);
 
-  // Default is 'firefox'. Overridable via TUTORIAL_RENDER_ENGINE or explicit param.
-  const engine: TutorialRenderEngine = explicitEngine ?? 'firefox';
+  // Default is 'firefox'. Overridable via EXPLAINER_RENDER_ENGINE or explicit param.
+  const engine: ExplainerRenderEngine = explicitEngine ?? 'firefox';
 
-  // A Chromium executable path is meaningless on the firefox engine — surface
-  // the conflict instead of silently ignoring the path.
   if (explicitEngine === 'firefox' && params.browserPath) {
     throw new Error(
       `render engine 'firefox' does not accept browserPath (a Chromium executable) — pass engine 'chromium' to use it`
@@ -193,12 +203,14 @@ export async function launchRenderBrowser(
 
     const customFfPath =
       process.env.FIREFOX_PATH ||
+      process.env.EXPLAINER_RENDER_FIREFOX_PATH ||
       process.env.TUTORIAL_RENDER_FIREFOX_PATH ||
       (fs.existsSync('/home/piagent/.cache/ms-playwright/firefox-1555/firefox/firefox')
         ? '/home/piagent/.cache/ms-playwright/firefox-1555/firefox/firefox'
         : undefined);
 
-    const isHeadless = process.env.TUTORIAL_RENDER_HEADLESS === 'true';
+    const isHeadless =
+      (process.env.EXPLAINER_RENDER_HEADLESS || process.env.TUTORIAL_RENDER_HEADLESS) === 'true';
 
     const context = await firefox.launchPersistentContext(profileDir, {
       ...(customFfPath ? { executablePath: customFfPath } : {}),
@@ -242,9 +254,9 @@ export async function launchRenderBrowser(
   return { browser, page, engine, executablePath };
 }
 
-export interface RenderTutorialVideoParams {
-  /** Tutorial bundle directory containing tutorial-player.html and assets. */
-  tutorialDir: string;
+export interface RenderExplainerVideoParams {
+  /** Explainer bundle directory containing explainer-player.html and assets. */
+  explainerDir: string;
   /** Timeline with resolution, fps and total duration. */
   timeline: {
     resolution: { width: number; height: number };
@@ -253,10 +265,10 @@ export interface RenderTutorialVideoParams {
   };
   /** Absolute path of the full narration WAV (muxed into the final video). */
   narrationWavPath: string;
-  /** Destination MP4 path of the final tutorial video. */
+  /** Destination MP4 path of the final explainer video. */
   outVideoPath: string;
-  /** Render engine override. Defaults to local Firefox (TUTORIAL_RENDER_ENGINE). */
-  engine?: TutorialRenderEngine;
+  /** Render engine override. Defaults to local Firefox (EXPLAINER_RENDER_ENGINE). */
+  engine?: ExplainerRenderEngine;
   /** Chromium executable path (engine 'chromium' only; auto-detected if omitted). */
   browserPath?: string;
   crf?: number;
@@ -264,15 +276,17 @@ export interface RenderTutorialVideoParams {
   logFilePath?: string;
   onProgress?: (renderedFrames: number, totalFrames: number) => void;
 }
+export type RenderTutorialVideoParams = RenderExplainerVideoParams & { tutorialDir?: string };
 
-export interface RenderTutorialVideoResult {
+export interface RenderExplainerVideoResult {
   videoPath: string;
   silentVideoPath: string;
   framesRendered: number;
   totalFrames: number;
   durationSec: number;
-  engine: TutorialRenderEngine;
+  engine: ExplainerRenderEngine;
 }
+export type RenderTutorialVideoResult = RenderExplainerVideoResult;
 
 /**
  * Sizes the concurrent chunk-render pool.
@@ -280,7 +294,7 @@ export interface RenderTutorialVideoResult {
  * Each worker owns one browser process AND one ffmpeg encoder, so one worker needs
  * ~2 CPU cores. A flat 2 therefore starves a 2-core box (4 CPU-heavy processes on
  * 2 cores) and makes a single 1080p evaluate+screenshot miss the frame budget.
- * Exported for unit testing; override with TUTORIAL_RENDER_CONCURRENCY.
+ * Exported for unit testing; override with EXPLAINER_RENDER_CONCURRENCY.
  */
 export function resolveRenderConcurrency(cpuCount: number, override?: number): number {
   if (override !== undefined && Number.isFinite(override) && override > 0) {
@@ -291,7 +305,7 @@ export function resolveRenderConcurrency(cpuCount: number, override?: number): n
 
 /**
  * Per-frame ceiling for `evaluate(seek) + screenshot`. This is a runaway guard, not
- * the expected cost; override with TUTORIAL_FRAME_TIMEOUT_MS.
+ * the expected cost; override with EXPLAINER_FRAME_TIMEOUT_MS.
  */
 export function resolveFrameTimeoutMs(override?: number): number {
   return override !== undefined && Number.isFinite(override) && override > 0 ? Math.floor(override) : 30_000;
@@ -300,25 +314,26 @@ export function resolveFrameTimeoutMs(override?: number): number {
 /**
  * Renders the player frame-by-frame into a video and muxes the narration track.
  */
-export async function renderTutorialVideo(
-  params: RenderTutorialVideoParams
-): Promise<RenderTutorialVideoResult> {
-  const { tutorialDir, timeline, narrationWavPath, outVideoPath } = params;
+export async function renderExplainerVideo(
+  params: RenderExplainerVideoParams | (RenderTutorialVideoParams & { tutorialDir?: string })
+): Promise<RenderExplainerVideoResult> {
+  const explainerDir = (params as any).explainerDir || (params as any).tutorialDir;
+  const { timeline, narrationWavPath, outVideoPath } = params;
   const { width, height } = timeline.resolution;
   const fps = timeline.fps;
   const totalFrames = Math.max(1, Math.round(timeline.totalDurationSec * fps));
-  const silentVideoPath = path.join(path.dirname(outVideoPath), 'tutorial-silent.mp4');
+  const silentVideoPath = path.join(path.dirname(outVideoPath), 'explainer-silent.mp4');
 
   await fsp.mkdir(path.dirname(outVideoPath), { recursive: true });
 
   const chunkDir = path.join(path.dirname(outVideoPath), '.render-chunks');
   await fsp.mkdir(chunkDir, { recursive: true });
 
-  const server = await serveTutorialDir(tutorialDir);
+  const server = await serveExplainerDir(explainerDir);
   const CHUNK_SIZE = 1000; // 1000 frames (~33s) per segment with fresh browser connection
 
   try {
-    const envEngine = process.env.TUTORIAL_RENDER_ENGINE;
+    const envEngine = process.env.EXPLAINER_RENDER_ENGINE || process.env.TUTORIAL_RENDER_ENGINE;
     const engine = params.engine ?? (envEngine === 'firefox' || envEngine === 'chromium' ? envEngine : 'firefox');
 
     // Dual-thread concurrent chunk renderer
@@ -333,16 +348,16 @@ export async function renderTutorialVideo(
     const chunkFiles: string[] = chunkTasks.map((t) => t.chunkFilePath);
     let overallRendered = 0;
 
-    // Concurrency: each worker runs BOTH a browser process and an ffmpeg encoder, so a
-    // single worker needs ~2 CPU cores to keep up. A flat `2` starves a 2-core box
-    // (2 Chromium + 2 ffmpeg = 4 CPU-heavy processes on 2 cores) and a 1080p
-    // evaluate+screenshot can then blow the per-frame budget, aborting the whole
-    // render (observed: frames 145 and 1061 timed out). Derive the pool from the
-    // actual CPU count and allow an explicit override for tuning/tests.
     const cpuCount = os.cpus()?.length || 2;
-    const CONCURRENCY = resolveRenderConcurrency(cpuCount, Number(process.env.TUTORIAL_RENDER_CONCURRENCY));
-    const FRAME_TIMEOUT_MS = resolveFrameTimeoutMs(Number(process.env.TUTORIAL_FRAME_TIMEOUT_MS));
+    const concurrencyEnv = process.env.EXPLAINER_RENDER_CONCURRENCY || process.env.TUTORIAL_RENDER_CONCURRENCY;
+    const CONCURRENCY = resolveRenderConcurrency(cpuCount, Number(concurrencyEnv));
+    const frameTimeoutEnv = process.env.EXPLAINER_FRAME_TIMEOUT_MS || process.env.TUTORIAL_FRAME_TIMEOUT_MS;
+    const FRAME_TIMEOUT_MS = resolveFrameTimeoutMs(Number(frameTimeoutEnv));
     let taskIndex = 0;
+
+    // Detect player HTML filename in bundle
+    const hasExplainerHtml = fs.existsSync(path.join(explainerDir, 'explainer-player.html'));
+    const playerHtmlFilename = hasExplainerHtml ? 'explainer-player.html' : 'tutorial-player.html';
 
     const renderChunkWorker = async (workerId: number): Promise<void> => {
       while (taskIndex < chunkTasks.length) {
@@ -361,7 +376,7 @@ export async function renderTutorialVideo(
           }
         } catch {}
 
-        const workerProfileDir = path.join(os.tmpdir(), `videgen-render-ff-w${workerId}-${Date.now()}`);
+        const workerProfileDir = path.join(os.tmpdir(), `xhot-render-ff-w${workerId}-${Date.now()}`);
         await fsp.mkdir(workerProfileDir, { recursive: true });
 
         let chunkBrowser: Browser | BrowserContext | null = null;
@@ -378,13 +393,15 @@ export async function renderTutorialVideo(
           chunkBrowser = launched.browser;
           const page = launched.page;
 
-          await page.goto(`${server.origin}/tutorial-player.html?render=1`, { waitUntil: 'load', timeout: 60_000 });
-          await page.waitForFunction('window.__tutorialReady === true || window.__tutorialError', undefined, {
-            timeout: 60_000,
-          });
+          await page.goto(`${server.origin}/${playerHtmlFilename}?render=1`, { waitUntil: 'load', timeout: 60_000 });
+          await page.waitForFunction(
+            'window.__explainerReady === true || window.__tutorialReady === true || window.__explainerError || window.__tutorialError',
+            undefined,
+            { timeout: 60_000 }
+          );
 
-          const bootErr = await page.evaluate('window.__tutorialError || null');
-          if (bootErr) throw new Error(`tutorial player failed to boot: ${bootErr}`);
+          const bootErr = await page.evaluate('window.__explainerError || window.__tutorialError || null');
+          if (bootErr) throw new Error(`explainer player failed to boot: ${bootErr}`);
 
           await page.evaluate(() => {
             document.documentElement.classList.add('render-mode');
@@ -422,7 +439,10 @@ export async function renderTutorialVideo(
 
             const frameDone = await Promise.race([
               (async () => {
-                await page.evaluate((time: number) => window.__tutorial!.seek(time), t);
+                await page.evaluate((time: number) => {
+                  const api = window.__explainer || window.__tutorial;
+                  return api!.seek(time);
+                }, t);
                 return await page.screenshot({ type: 'png' });
               })(),
               new Promise<null>((r) => setTimeout(() => r(null), FRAME_TIMEOUT_MS)),
@@ -512,3 +532,5 @@ export async function renderTutorialVideo(
     await server.close();
   }
 }
+
+export const renderTutorialVideo = renderExplainerVideo;

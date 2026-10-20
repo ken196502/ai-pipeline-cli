@@ -1,7 +1,7 @@
 /**
  * Xhot 3-Layer Architecture:
  * Layer 1: Utils & Libs (Low-level foundational libraries and utilities)
- * Layer 2: Modules (Autonomous business capability modules: auth, discovery, evaluation, harvest, presentation)
+ * Layer 2: Modules (Autonomous business capability modules: auth, discovery, evaluation, harvest, explainer-video)
  * Layer 3: Pipelines (End-to-end orchestration pipelines: core, xhot)
  */
 

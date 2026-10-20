@@ -5,7 +5,7 @@ import {
   testDiscoveryModule,
   testEvaluationModule,
   testHarvestModule,
-  testPresentationModule,
+  testExplainerVideoModule,
   testAllModules,
 } from '../src/modules/index.js';
 
@@ -34,9 +34,9 @@ test('Module 4 (Harvest): verifies yt-dlp binary resolution for media capture', 
   assert.ok(res.ytDlpAvailable, 'yt-dlp must be accessible on system');
 });
 
-test('Module 5 (Presentation): builds OpusVideo materials from harvested assets', async () => {
-  const res = await testPresentationModule();
-  assert.equal(res.success, true, `Presentation module self-test failed: ${res.errors.join(', ')}`);
+test('Module 5 (Explainer Video): builds OpusVideo materials from harvested assets', async () => {
+  const res = await testExplainerVideoModule();
+  assert.equal(res.success, true, `Explainer video module self-test failed: ${res.errors.join(', ')}`);
   assert.equal(res.assetsBuilt, true);
 });
 
@@ -47,5 +47,5 @@ test('Unified testAllModules(): runs all 5 modules sequentially', async () => {
   assert.equal(unified.results['discovery'].success, true);
   assert.equal(unified.results['evaluation'].success, true);
   assert.equal(unified.results['harvest'].success, true);
-  assert.equal(unified.results['presentation'].success, true);
+  assert.equal(unified.results['explainer-video'].success, true);
 });

@@ -1,4 +1,4 @@
-import { buildXHotTutorialAssets } from './video.js';
+import { buildExplainerAssets } from './video.js';
 import type { XHotEvalResult } from '../evaluation/contracts.js';
 import type { XHotHarvestResult } from '../harvest/contracts.js';
 import path from 'node:path';
@@ -10,17 +10,17 @@ export * from './produce.js';
 export * from './video.js';
 
 /**
- * Self-test routine for the Presentation Module.
+ * Self-test routine for the Explainer Video Module.
  * Verifies asset assembly mapping and storyboard structure validation.
  */
-export async function testPresentationModule(): Promise<{
+export async function testExplainerVideoModule(): Promise<{
   success: boolean;
   assetsBuilt: boolean;
   assetCount: number;
   errors: string[];
 }> {
   const errors: string[] = [];
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'test-presentation-'));
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'test-explainer-'));
   let assetsBuilt = false;
   let assetCount = 0;
 
@@ -59,11 +59,11 @@ export async function testPresentationModule(): Promise<{
       harvestedMediaCount: 0,
     };
 
-    const assets = await buildXHotTutorialAssets(mockEval, mockHarvest, path.join(tempDir, 'assets'));
+    const assets = await buildExplainerAssets(mockEval, mockHarvest, path.join(tempDir, 'assets'));
     assetsBuilt = true;
     assetCount = assets.length;
   } catch (err: any) {
-    errors.push(`Presentation asset build error: ${err.message}`);
+    errors.push(`Explainer asset build error: ${err.message}`);
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -75,3 +75,5 @@ export async function testPresentationModule(): Promise<{
     errors,
   };
 }
+
+export const testPresentationModule = testExplainerVideoModule;

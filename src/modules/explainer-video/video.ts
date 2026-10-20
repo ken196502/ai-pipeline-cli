@@ -2,9 +2,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import pc from 'picocolors';
 import type {
-  TutorialAsset,
-  TutorialStoryboard,
-  TutorialGenerationSummary,
+  ExplainerAsset,
+  ExplainerStoryboard,
+  ExplainerVideoSummary,
 } from '../../libs/player/contracts.js';
 import {
   generateExplainerStoryboard,
@@ -13,18 +13,18 @@ import {
 import { maskProfanity } from '../../utils/text.js';
 import type { XHotEvalResult } from '../evaluation/contracts.js';
 import type { XHotHarvestResult } from '../harvest/contracts.js';
-import type { CreateXHotVideoOptions } from './contracts.js';
+import type { CreateExplainerVideoOptions } from './contracts.js';
 
 /**
  * Builds OpusVideo materials list from Xhot evaluation and harvested assets.
  */
-export async function buildXHotTutorialAssets(
+export async function buildExplainerAssets(
   evalResult: XHotEvalResult,
   harvestResult: XHotHarvestResult,
   assetsOutDir: string
-): Promise<TutorialAsset[]> {
+): Promise<ExplainerAsset[]> {
   await fs.mkdir(assetsOutDir, { recursive: true });
-  const assets: TutorialAsset[] = [];
+  const assets: ExplainerAsset[] = [];
 
   // 1. Candidate Grid
   if (evalResult.gridImagePath) {
@@ -83,17 +83,16 @@ export async function buildXHotTutorialAssets(
 
   return assets;
 }
+export const buildXHotTutorialAssets = buildExplainerAssets;
 
 /**
  * Uses LLM to generate an OpusVideo storyboard introducing the #1 trending topic/model.
- * Domain prompts only — JSON extraction / schema validation / repair is shared
- * explainer-module machinery.
  */
-export async function generateXHotStoryboard(
+export async function generateExplainerStoryboardFromXHot(
   evalResult: XHotEvalResult,
   harvestResult: XHotHarvestResult,
-  assets: TutorialAsset[]
-): Promise<TutorialStoryboard> {
+  assets: ExplainerAsset[]
+): Promise<ExplainerStoryboard> {
   const assetListText = assets
     .map((a) => `- "${a.id}" (${a.kind}): ${a.label}`)
     .join('\n');
@@ -109,7 +108,7 @@ export async function generateXHotStoryboard(
   if (maskedTweetCount > 0) {
     console.log(
       pc.yellow(
-        `[x-video] Masked profanity in ${maskedTweetCount} harvested tweet(s) for content-filter compliance`
+        `[explainer-video] Masked profanity in ${maskedTweetCount} harvested tweet(s) for content-filter compliance`
       )
     );
   }
@@ -190,15 +189,16 @@ ${tweetSummaries}
     fallbackTopic: evalResult.query,
   });
 }
+export const generateXHotStoryboard = generateExplainerStoryboardFromXHot;
 
 /**
  * Coordinates asset packaging, storyboard generation, and the shared explainer
  * production tail (TTS → player → render → grid → summary) for the Xhot
- * #1-trending-topic introduction video.
+ * #1-trending-topic explainer video.
  */
-export async function createXHotPresentationVideo(
-  options: CreateXHotVideoOptions
-): Promise<TutorialGenerationSummary> {
+export async function createExplainerVideo(
+  options: CreateExplainerVideoOptions
+): Promise<ExplainerVideoSummary> {
   const {
     query,
     evalResult,
@@ -214,28 +214,29 @@ export async function createXHotPresentationVideo(
   } = options;
 
   const progress = (stage: string, message: string) => {
-    console.log(pc.cyan(`[x-video] [${stage}] ${message}`));
+    console.log(pc.cyan(`[explainer-video] [${stage}] ${message}`));
     onProgress?.(stage, message);
   };
 
-  const tutorialDir = path.join(outDir, 'tutorial');
-  const assetsOutDir = path.join(tutorialDir, 'assets');
+  const explainerDir = path.join(outDir, 'explainer');
+  const assetsOutDir = path.join(explainerDir, 'assets');
   await fs.mkdir(assetsOutDir, { recursive: true });
 
   // 1. Inventory & copy assets
-  progress('assets', 'Collecting and packaging visual assets for tutorial canvas...');
-  const assets = await buildXHotTutorialAssets(evalResult, harvestResult, assetsOutDir);
+  progress('assets', 'Collecting and packaging visual assets for explainer canvas...');
+  const assets = await buildExplainerAssets(evalResult, harvestResult, assetsOutDir);
   if (assets.length === 0) {
-    throw new Error('No assets could be gathered from Xhot harvest for video presentation');
+    throw new Error('No assets could be gathered from Xhot harvest for explainer video');
   }
 
   // 2. Generate Storyboard with LLM
   progress('storyboard', 'Generating documentary storyboard script via LLM...');
-  const storyboard = await generateXHotStoryboard(evalResult, harvestResult, assets);
+  const storyboard = await generateExplainerStoryboardFromXHot(evalResult, harvestResult, assets);
 
   // 3. Shared explainer production tail (TTS → timeline → player → render → grid → summary)
   return produceExplainerVideo({
     outDir,
+    explainerDirname: 'explainer',
     runId: path.basename(outDir),
     topic: query,
     title: evalResult.winner.name,
@@ -250,9 +251,11 @@ export async function createXHotPresentationVideo(
     ttsVoice: options.ttsVoice || 'en-US-ChristopherNeural',
     ttsRate,
     browserPath: options.browserPath,
-    resultFilename: 'tutorial-result.json',
-    storyboardFilename: '10-tutorial-storyboard.json',
+    resultFilename: 'explainer-result.json',
+    storyboardFilename: '10-explainer-storyboard.json',
     gridOptions: () => ({ count: 9 }),
     onProgress: progress,
   });
 }
+
+export const createXHotPresentationVideo = createExplainerVideo;

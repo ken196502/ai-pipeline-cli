@@ -11,7 +11,15 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import type { TutorialWord, TutorialClip, TutorialVoiceData, TutorialVoiceClip, TutorialVoiceShot, TutorialVoiceLine, TutorialAsset } from './contracts.js';
+import type {
+  ExplainerWord,
+  ExplainerClip,
+  ExplainerVoiceData,
+  ExplainerVoiceClip,
+  ExplainerVoiceShot,
+  ExplainerVoiceLine,
+  ExplainerAsset,
+} from './contracts.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -45,7 +53,7 @@ export interface LocalTtsResponse {
 export async function synthesizeLocalTts(
   text: string,
   options: { url?: string; timeoutMs?: number } = {}
-): Promise<{ audioBuffer: Buffer; durationSec: number; words: TutorialWord[] }> {
+): Promise<{ audioBuffer: Buffer; durationSec: number; words: ExplainerWord[] }> {
   const baseUrl = resolveLocalTtsUrl(options.url);
   const endpoint = `${baseUrl}/tts`;
   const timeoutMs = options.timeoutMs ?? 60_000;
@@ -77,7 +85,7 @@ export async function synthesizeLocalTts(
   }
 
   const audioBuffer = Buffer.from(data.audio_base64, 'base64');
-  const words: TutorialWord[] = (data.timestamps || []).map((t) => ({
+  const words: ExplainerWord[] = (data.timestamps || []).map((t) => ({
     word: t.text,
     t0: Math.round(t.start_time * 1000) / 1000,
     t1: Math.round(t.end_time * 1000) / 1000,
@@ -126,7 +134,7 @@ export interface NarrationSegmentResult {
   sceneId: string;
   audioPath: string;
   durationSec: number;
-  words: TutorialWord[];
+  words: ExplainerWord[];
 }
 
 export interface SynthesizeNarrationOptions {
@@ -233,7 +241,7 @@ export async function synthesizeEdgeTtsAudio(params: {
   voice?: string;
   rate?: string;
   pythonBin?: string;
-}): Promise<{ audioPath: string; wordsPath: string; durationSec: number; words: TutorialWord[] }> {
+}): Promise<{ audioPath: string; wordsPath: string; durationSec: number; words: ExplainerWord[] }> {
   const { text, outAudioPath } = params;
   const voice = params.voice || 'zh-CN-YunxiNeural';
   const rate = params.rate || '+0%';
@@ -261,7 +269,7 @@ export async function synthesizeEdgeTtsAudio(params: {
   );
 
   const durationSec = await probeDurationSec(outAudioPath);
-  let words: TutorialWord[] = [];
+  let words: ExplainerWord[] = [];
   try {
     const payload = JSON.parse(await fs.readFile(wordsPath, 'utf-8'));
     words = payload.words || [];
@@ -410,7 +418,7 @@ export async function buildNarrationTrack(
   }
 
   const sampleRate = options.sampleRate ?? 44100;
-  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tutorial-narration-'));
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'explainer-narration-'));
   const wavPath = `${outBasePath}.wav`;
   const m4aPath = `${outBasePath}.m4a`;
   const totalDurationSec = segments.reduce((acc, seg) => acc + seg.durationSec, 0);
@@ -527,14 +535,14 @@ export const OPUS_TIMING = {
 export interface OpusVoiceTrackResult {
   wavPath: string;
   mp3Path: string;
-  voiceData: TutorialVoiceData;
+  voiceData: ExplainerVoiceData;
   totalDurationSec: number;
 }
 
 export async function buildOpusVoiceTrack(params: {
-  clips: TutorialClip[];
+  clips: ExplainerClip[];
   outAudioDir: string;
-  assets?: TutorialAsset[];
+  assets?: ExplainerAsset[];
   voice?: string;
   rate?: string;
   sampleRate?: number;
@@ -573,7 +581,7 @@ export async function buildOpusVoiceTrack(params: {
   let currentCursor = 0;
   let partIndex = 0;
 
-  const voiceClips: TutorialVoiceClip[] = [];
+  const voiceClips: ExplainerVoiceClip[] = [];
 
   try {
     for (let ci = 0; ci < clips.length; ci += 1) {
@@ -585,12 +593,12 @@ export async function buildOpusVoiceTrack(params: {
       audioParts.push(titleSilence);
       currentCursor += OPUS_TIMING.TITLE_SAFE;
 
-      const voiceShots: TutorialVoiceShot[] = [];
+      const voiceShots: ExplainerVoiceShot[] = [];
 
       for (let si = 0; si < clip.shots.length; si += 1) {
         const shot = clip.shots[si];
         const shotStart = currentCursor;
-        const voiceLines: TutorialVoiceLine[] = [];
+        const voiceLines: ExplainerVoiceLine[] = [];
 
         for (let li = 0; li < shot.elements.length; li += 1) {
           const lineText = shot.narration[li] || (shot.elements[li][0] as string);
@@ -601,7 +609,7 @@ export async function buildOpusVoiceTrack(params: {
           const segWavPath = path.join(workDir, `clip-${ci}-shot-${si}-line-${li}-resampled.wav`);
           let aDur = 0;
           const chars: Array<{ c: string; t: number }> = [];
-          let lineWords: TutorialWord[] = [];
+          let lineWords: ExplainerWord[] = [];
 
           if (isFinalVideo) {
             // 成片自带声音，成片展示期间绝不加教程 TTS 旁白覆盖成片！
@@ -772,7 +780,7 @@ export async function buildOpusVoiceTrack(params: {
       mp3Path,
     ]);
 
-    const voiceData: TutorialVoiceData = {
+    const voiceData: ExplainerVoiceData = {
       voice,
       total: totalDurationSec,
       titleSafe: OPUS_TIMING.TITLE_SAFE,

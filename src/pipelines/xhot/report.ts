@@ -49,14 +49,15 @@ export function generateXHotMarkdown(result: XHotFullResult): string {
     lines.push(``);
   }
 
-  if (result.tutorial) {
-    lines.push(`## 🎬 Presentation Video`);
+  const explainer = result.explainer || result.tutorial;
+  if (explainer) {
+    lines.push(`## 🎬 Explainer Video`);
     lines.push(``);
-    lines.push(`- **Video File:** \`${path.basename(result.tutorial.videoPath)}\``);
-    lines.push(`- **Duration:** ${result.tutorial.totalDurationSec.toFixed(1)}s @ ${result.tutorial.fps}fps`);
-    lines.push(`- **Resolution:** ${result.tutorial.resolution.width}x${result.tutorial.resolution.height}`);
-    lines.push(`- **Storyboard Scenes:** ${result.tutorial.sceneCount}`);
-    lines.push(`- **Player HTML:** \`${path.basename(result.tutorial.playerPath)}\``);
+    lines.push(`- **Video File:** \`${path.basename(explainer.videoPath)}\``);
+    lines.push(`- **Duration:** ${explainer.totalDurationSec.toFixed(1)}s @ ${explainer.fps}fps`);
+    lines.push(`- **Resolution:** ${explainer.resolution.width}x${explainer.resolution.height}`);
+    lines.push(`- **Storyboard Scenes:** ${explainer.sceneCount}`);
+    lines.push(`- **Player HTML:** \`${path.basename(explainer.playerPath)}\``);
     lines.push(``);
   }
 
@@ -68,6 +69,7 @@ export function generateXHotJson(result: XHotFullResult): string {
 }
 
 export function printXHotSummary(result: XHotFullResult): void {
+  const explainer = result.explainer || result.tutorial;
   console.log(`\n==============================================`);
   console.log(`🔥 XHOT PIPELINE EXECUTION SUMMARY`);
   console.log(`==============================================`);
@@ -76,8 +78,8 @@ export function printXHotSummary(result: XHotFullResult): void {
     console.log(`• Winner (Top 1): ${result.winner.name}`);
     console.log(`• Summary:      ${result.winner.summary}`);
   }
-  if (result.tutorial?.videoPath) {
-    console.log(`• Video Output: ${result.tutorial.videoPath} (${result.tutorial.totalDurationSec.toFixed(1)}s)`);
+  if (explainer?.videoPath) {
+    console.log(`• Explainer Video: ${explainer.videoPath} (${explainer.totalDurationSec.toFixed(1)}s)`);
   }
   console.log(`• Out Dir:      ${result.outDir}`);
   console.log(`• Duration:     ${(result.totalDurationMs / 1000).toFixed(1)}s`);

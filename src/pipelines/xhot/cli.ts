@@ -25,10 +25,13 @@ export function attachXHotOptions(cmd: Command): Command {
     .option('--profile-dir <path>', 'Custom Chromium profile directory (defaults to ./.chromium-profile)')
     .option('--headed', 'Run browser in headful mode for visible interaction', false)
     .option('--headless', 'Force browser headless mode', true)
-    .option('--skip-video', 'Skip OpusVideo presentation generation', false)
-    .option('--tutorial-engine <engine>', 'Tutorial video render engine (chromium, firefox)', 'chromium')
-    .option('--tutorial-fps <n>', 'Frame rate of presentation video', (v) => parseInt(v, 10), 30)
-    .option('--tutorial-subtitles', 'Enable narration subtitles / captions', false)
+    .option('--skip-video', 'Skip explainer video generation', false)
+    .option('--explainer-engine <engine>', 'Explainer video render engine (chromium, firefox)', 'chromium')
+    .option('--explainer-fps <n>', 'Frame rate of explainer video', (v) => parseInt(v, 10), 30)
+    .option('--explainer-subtitles', 'Enable narration subtitles / captions', false)
+    .option('--tutorial-engine <engine>', 'Legacy alias for --explainer-engine')
+    .option('--tutorial-fps <n>', 'Legacy alias for --explainer-fps', (v) => parseInt(v, 10))
+    .option('--tutorial-subtitles', 'Legacy alias for --explainer-subtitles')
     .option('--tts-voice <name>', 'edge-tts voice name for narration')
     .option('--tts-rate <rate>', 'edge-tts speech rate adjustment (e.g. +10%)', '+0%')
     .option('--dry-run', 'Run pipeline in dry-run mode without live network/generation calls', false);
@@ -47,9 +50,9 @@ export async function handleXHotCommand(queryArg?: string, opts: any = {}): Prom
     headed: Boolean(opts.headed),
     headless: opts.headless !== undefined ? Boolean(opts.headless) : !opts.headed,
     skipVideo: Boolean(opts.skipVideo),
-    tutorialEngine: opts.tutorialEngine || 'chromium',
-    tutorialFps: opts.tutorialFps ?? 30,
-    tutorialSubtitles: Boolean(opts.tutorialSubtitles),
+    explainerEngine: opts.explainerEngine || opts.tutorialEngine || 'chromium',
+    explainerFps: opts.explainerFps ?? opts.tutorialFps ?? 30,
+    explainerSubtitles: Boolean(opts.explainerSubtitles || opts.tutorialSubtitles),
     ttsVoice: opts.ttsVoice,
     ttsRate: opts.ttsRate || '+0%',
     dryRun: Boolean(opts.dryRun),
@@ -62,8 +65,9 @@ export async function handleXHotCommand(queryArg?: string, opts: any = {}): Prom
       console.log(`🏆 Winner: ${pc.bold(result.winner.name)}`);
       console.log(`📝 Summary: ${result.winner.summary}`);
     }
-    if (result.tutorial?.videoPath) {
-      console.log(`🎬 Video: ${result.tutorial.videoPath}`);
+    const explainer = result.explainer || result.tutorial;
+    if (explainer?.videoPath) {
+      console.log(`🎬 Video: ${explainer.videoPath}`);
     }
     console.log(`📁 Artifacts: ${result.outDir}\n`);
 
@@ -90,8 +94,8 @@ export async function handleXHotCommand(queryArg?: string, opts: any = {}): Prom
       msgLines.push(`• Materials: ${result.harvestResult.items.length} tweets, ${result.harvestResult.harvestedMediaCount} media files`);
     }
 
-    if (result.tutorial?.videoPath) {
-      msgLines.push(`• Video: ${path.basename(result.tutorial.videoPath)} (${result.tutorial.totalDurationSec.toFixed(1)}s @ ${result.tutorial.fps}fps)`);
+    if (explainer?.videoPath) {
+      msgLines.push(`• Video: ${path.basename(explainer.videoPath)} (${explainer.totalDurationSec.toFixed(1)}s @ ${explainer.fps}fps)`);
     }
 
     msgLines.push(`• Output Dir: ${result.outDir}`);
@@ -100,16 +104,16 @@ export async function handleXHotCommand(queryArg?: string, opts: any = {}): Prom
 
     // Best attachment: video > grid preview > candidate grid > markdown report
     let attachment: { filePath: string; fileName?: string; mimetype?: string } | undefined;
-    if (result.tutorial?.videoPath && fs.existsSync(result.tutorial.videoPath)) {
+    if (explainer?.videoPath && fs.existsSync(explainer.videoPath)) {
       attachment = {
-        filePath: result.tutorial.videoPath,
-        fileName: path.basename(result.tutorial.videoPath),
+        filePath: explainer.videoPath,
+        fileName: path.basename(explainer.videoPath),
         mimetype: 'video/mp4',
       };
-    } else if (result.tutorial?.gridPath && fs.existsSync(result.tutorial.gridPath)) {
+    } else if (explainer?.gridPath && fs.existsSync(explainer.gridPath)) {
       attachment = {
-        filePath: result.tutorial.gridPath,
-        fileName: 'tutorial-grid.jpg',
+        filePath: explainer.gridPath,
+        fileName: 'explainer-grid.jpg',
         mimetype: 'image/jpeg',
       };
     } else if (result.gridImagePath && fs.existsSync(result.gridImagePath)) {

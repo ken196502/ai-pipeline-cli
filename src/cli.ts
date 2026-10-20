@@ -6,7 +6,7 @@ async function main() {
   const program = new Command();
   program
     .name('xhot')
-    .description('Xhot Pipeline: Discover hot topics on X, rank with VL grid, harvest materials, and render presentation video')
+    .description('Xhot Pipeline: Discover hot topics on X, rank with VL grid, harvest materials, and render explainer video')
     .version('1.0.0');
 
   attachXHotOptions(program);

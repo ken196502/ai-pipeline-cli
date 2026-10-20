@@ -1,6 +1,6 @@
 /**
-2:  * OpusVideo tutorial/canvas rendering engine.
-3:  */
+ * OpusVideo explainer/canvas rendering engine.
+ */
 export * from './contracts.js';
 export * from './player.js';
 export * from './tts.js';

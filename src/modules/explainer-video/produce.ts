@@ -5,16 +5,16 @@ import { chat } from '../../libs/llm/client.js';
 import { extractJsonObject } from '../../libs/llm/json.js';
 import { getEnvConfig } from '../../utils/env.js';
 import {
-  TutorialStoryboardSchema,
-  TutorialTimelineSchema,
-  type TutorialGenerationSummary,
-  type TutorialStoryboard,
-  type TutorialTimeline,
+  ExplainerStoryboardSchema,
+  ExplainerTimelineSchema,
+  type ExplainerVideoSummary,
+  type ExplainerStoryboard,
+  type ExplainerTimeline,
 } from '../../libs/player/contracts.js';
-import { createTutorialGrid } from '../../libs/player/grid.js';
+import { createExplainerGrid } from '../../libs/player/grid.js';
 import { listLucideIconNames, resolveLucideIcons } from '../../libs/player/icons.js';
-import { writeTutorialPlayer } from '../../libs/player/player.js';
-import { renderTutorialVideo } from '../../libs/player/render.js';
+import { writeExplainerPlayer } from '../../libs/player/player.js';
+import { renderExplainerVideo } from '../../libs/player/render.js';
 import { writeHostRenderScript } from '../../libs/player/host-script.js';
 import { buildOpusVoiceTrack, type OpusVoiceTrackResult } from '../../libs/player/tts.js';
 import type { ExplainerProduceOptions } from './contracts.js';
@@ -26,23 +26,20 @@ export const EXPLAINER_DEFAULTS = {
   crf: 20,
   preset: 'medium',
   engine: 'chromium' as 'firefox' | 'chromium',
-  tutorialDirname: 'tutorial',
-  videoFilename: 'tutorial-video.mp4',
-  gridFilename: 'tutorial-grid.jpg',
+  explainerDirname: 'explainer',
+  tutorialDirname: 'explainer',
+  videoFilename: 'explainer-video.mp4',
+  gridFilename: 'explainer-grid.jpg',
 };
 
 /**
- * Shared production tail for every explainer/presentation video pipeline:
+ * Shared production tail for every explainer video pipeline:
  *   TTS voice track → timeline assembly → player bundle → host render script
  *   → headless frame render → (afterRender hook) → contact grid → summary.
- *
- * Domain pipelines (xhot introduction videos, viral tutorial videos, …) supply
- * the two genuinely different parts — assets and a storyboard — and keep their
- * own asset collection / storyboard prompting / QA logic.
  */
 export async function produceExplainerVideo(
   options: ExplainerProduceOptions
-): Promise<TutorialGenerationSummary> {
+): Promise<ExplainerVideoSummary> {
   const {
     outDir,
     runId,
@@ -66,7 +63,7 @@ export async function produceExplainerVideo(
   const narrationLanguage = options.narrationLanguage ?? 'en';
   const voice = options.ttsVoice || 'local-clone';
   const rate = options.ttsRate ?? '+0%';
-  const tutorialDirname = options.tutorialDirname ?? EXPLAINER_DEFAULTS.tutorialDirname;
+  const explainerDirname = options.explainerDirname ?? options.tutorialDirname ?? EXPLAINER_DEFAULTS.explainerDirname;
 
   const progress = (stage: string, message: string) => {
     if (onProgress) {
@@ -76,9 +73,9 @@ export async function produceExplainerVideo(
     }
   };
 
-  const tutorialDir = path.join(outDir, tutorialDirname);
-  const assetsOutDir = path.join(tutorialDir, 'assets');
-  await fs.mkdir(tutorialDir, { recursive: true });
+  const explainerDir = path.join(outDir, explainerDirname);
+  const assetsOutDir = path.join(explainerDir, 'assets');
+  await fs.mkdir(explainerDir, { recursive: true });
   await fs.mkdir(assetsOutDir, { recursive: true });
 
   if (options.storyboardFilename) {
@@ -103,7 +100,7 @@ export async function produceExplainerVideo(
 
   // 2. Timeline assembly
   progress('player', 'Building OpusVideo player timeline...');
-  const timeline: TutorialTimeline = TutorialTimelineSchema.parse({
+  const timeline: ExplainerTimeline = ExplainerTimelineSchema.parse({
     version: '2.0.0',
     runId,
     ...(videoId ? { videoId } : {}),
@@ -144,26 +141,26 @@ export async function produceExplainerVideo(
     }
   }
 
-  const playerFiles = await writeTutorialPlayer({
+  const playerFiles = await writeExplainerPlayer({
     timeline,
     icons: resolveLucideIcons(usedIconNames),
-    outDir: tutorialDir,
+    outDir: explainerDir,
   });
   progress('player', `Player bundle ready: ${path.basename(playerFiles.htmlPath)}`);
 
-  const hostScript = await writeHostRenderScript({ tutorialDir });
+  const hostScript = await writeHostRenderScript({ explainerDir });
   progress('player', `Host render script ready: ${path.basename(hostScript.scriptPath)}`);
 
   // 4. Headless frame-by-frame render + narration mux
-  const videoPath = path.join(tutorialDir, EXPLAINER_DEFAULTS.videoFilename);
+  const videoPath = path.join(explainerDir, EXPLAINER_DEFAULTS.videoFilename);
   let framesRendered = 0;
   if (!options.previewOnly) {
     progress(
       'render',
       `Rendering ${Math.round(totalDurationSec * fps)} frames at ${fps}fps (${width}x${height}) using ${engine}...`
     );
-    const renderResult = await renderTutorialVideo({
-      tutorialDir,
+    const renderResult = await renderExplainerVideo({
+      explainerDir,
       timeline,
       narrationWavPath: voiceTrack.wavPath,
       outVideoPath: videoPath,
@@ -185,7 +182,7 @@ export async function produceExplainerVideo(
 
   // 5. Post-render hook (visual QA etc.) — throws to fail the production
   if (options.afterRender && !options.previewOnly) {
-    await options.afterRender({ videoPath, tutorialDir, timeline, voiceTrack });
+    await options.afterRender({ videoPath, explainerDir, timeline, voiceTrack });
   }
 
   // 6. Contact-sheet grid preview
@@ -194,8 +191,8 @@ export async function produceExplainerVideo(
     try {
       progress('grid', 'Building contact-sheet grid of the final video (grid preview for the report)');
       const gridOpts = options.gridOptions?.(voiceTrack);
-      gridPath = path.join(tutorialDir, EXPLAINER_DEFAULTS.gridFilename);
-      await createTutorialGrid({
+      gridPath = path.join(explainerDir, EXPLAINER_DEFAULTS.gridFilename);
+      await createExplainerGrid({
         videoPath,
         outPath: gridPath,
         count: gridOpts?.count,
@@ -241,7 +238,7 @@ export async function produceExplainerVideo(
     }))
   );
 
-  const summary: TutorialGenerationSummary = {
+  const summary: ExplainerVideoSummary = {
     status: 'completed',
     sceneCount: (storyboard.clips || []).reduce((acc, c) => acc + (c.shots || []).length, 0),
     totalDurationSec,
@@ -253,83 +250,82 @@ export async function produceExplainerVideo(
     assetsCount: assets.length,
     storyboardPath: options.storyboardFilename
       ? path.join(outDir, options.storyboardFilename)
-      : path.join(tutorialDir, 'storyboard.json'),
+      : path.join(explainerDir, 'storyboard.json'),
     gridPath,
     timelinePath: playerFiles.timelinePath,
     playerPath: playerFiles.htmlPath,
-    narrationPath: voiceTrack.mp3Path || voiceTrack.wavPath,
+    narrationPath: path.join(assetsOutDir, 'narration.mp3'),
     hostScriptPath: hostScript.scriptPath,
     videoPath: options.previewOnly ? '' : videoPath,
     framesRendered,
-    clipOutline,
     sceneOutline,
+    clipOutline,
     ...summaryExtras,
   };
 
   if (options.resultFilename) {
-    await fs.writeFile(
-      path.join(outDir, options.resultFilename),
-      JSON.stringify(summary, null, 2) + '\n',
-      'utf-8'
-    );
+    const resultPath = path.join(outDir, options.resultFilename);
+    await fs.writeFile(resultPath, JSON.stringify(summary, null, 2) + '\n', 'utf-8');
+    progress('summary', `Production summary saved: ${path.basename(resultPath)}`);
   }
 
-  await onSummary?.(summary);
+  if (onSummary) {
+    await onSummary(summary);
+  }
 
-  progress(
-    'done',
-    options.previewOnly
-      ? `Explainer preview ready (no render): ${playerFiles.htmlPath}`
-      : `Explainer video successfully created: ${videoPath} (${totalDurationSec.toFixed(1)}s)`
-  );
   return summary;
 }
 
-/**
- * Generic LLM storyboard generation: prompt → JSON extraction → schema
- * validation with deterministic repair (title/meta defaults). Domain pipelines
- * provide the prompts and any extra repair logic.
- */
-export async function generateExplainerStoryboard(params: {
+export interface GenerateExplainerStoryboardParams {
   systemPrompt: string;
   userPrompt: string;
   temperature?: number;
   contextTask?: string;
-  model?: string;
   fallbackTitle: string;
   fallbackTopic: string;
-}): Promise<TutorialStoryboard> {
-  const env = getEnvConfig();
-  const response = await chat(
-    {
-      context: { stage: 'explainer', task: params.contextTask || 'storyboard' },
-      messages: [
-        { role: 'system', content: params.systemPrompt },
-        { role: 'user', content: params.userPrompt },
-      ],
-      temperature: params.temperature ?? 0.3,
-    },
-    env
-  );
+}
 
-  const jsonExtraction = extractJsonObject(response.content);
-  if (!jsonExtraction.ok || !jsonExtraction.value) {
-    throw new Error(
-      `Failed to extract valid JSON storyboard: ${response.content.slice(0, 300)}`
-    );
+/**
+ * Shared helper that calls the LLM, extracts the JSON storyboard object,
+ * validates against ExplainerStoryboardSchema, and repairs any syntax or
+ * minor schema defects.
+ */
+export async function generateExplainerStoryboard(
+  params: GenerateExplainerStoryboardParams
+): Promise<ExplainerStoryboard> {
+  const rawResponse = await chat({
+    messages: [
+      { role: 'system', content: params.systemPrompt },
+      { role: 'user', content: params.userPrompt },
+    ],
+    temperature: params.temperature ?? 0.3,
+    context: { stage: 'explainer', task: params.contextTask ?? 'storyboard' },
+  });
+
+  const extraction = extractJsonObject(rawResponse.content);
+  if (!extraction.ok) {
+    throw new Error(`LLM did not return a valid JSON storyboard payload: ${extraction.reason}`);
   }
-  const parsed = jsonExtraction.value as any;
+  const parsed = extraction.value as any;
 
   try {
-    return TutorialStoryboardSchema.parse(parsed);
+    return ExplainerStoryboardSchema.parse(parsed);
   } catch (err: any) {
-    console.warn(pc.yellow(`[explainer] Storyboard schema warning: ${err.message}. Repairing...`));
-    parsed.title = parsed.title || params.fallbackTitle;
-    parsed.meta = parsed.meta || {
-      title: parsed.title,
-      subtitle: params.fallbackTopic,
-      design: { w: 1920, h: 1080 },
-    };
-    return TutorialStoryboardSchema.parse(parsed);
+    console.warn(pc.yellow(`[explainer] Storyboard validation issue, attempting repair: ${err.message}`));
+    // Repair common defects: ensure meta, fallback title, wrap shots
+    parsed.meta = parsed.meta || {};
+    parsed.meta.title = parsed.meta.title || parsed.title || params.fallbackTitle;
+    parsed.meta.design = parsed.meta.design || { w: 1920, h: 1080 };
+    parsed.clips = parsed.clips || [];
+
+    for (const clip of parsed.clips) {
+      clip.shots = clip.shots || [];
+      for (const shot of clip.shots) {
+        shot.elements = shot.elements || [['Visual Showcase', 'sparkles']];
+        shot.narration = shot.narration || ['Introducing this key milestone.'];
+      }
+    }
+
+    return ExplainerStoryboardSchema.parse(parsed);
   }
 }

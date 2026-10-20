@@ -36,7 +36,7 @@ test('XHotPipelineOptionsSchema validates query and defaults', { timeout: 5_000 
   });
   assert.equal(parsed.query, 'new model');
   assert.equal(parsed.candidateCount, 12);
-  assert.equal(parsed.tutorialEngine, 'chromium');
+  assert.equal(parsed.explainerEngine, 'chromium');
   assert.equal(parsed.dryRun, false);
 });
 

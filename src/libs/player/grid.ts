@@ -6,22 +6,22 @@ import { probeDurationSec } from './tts.js';
 import { buildFrameGrid, extractFrameAt, formatTimestamp, type ExtractedFrame } from '../media/frames.js';
 
 /**
- * Samples frames across the final tutorial video and builds the contact-sheet grid (grid 拼图).
+ * Samples frames across the final explainer video and builds the contact-sheet grid (grid 拼图).
  * When finalShowcaseRange is present, allocates dedicated grid slots (e.g. the entire bottom row)
  * specifically to sample the final AI video showcase, ensuring the final generated video is
  * prominently visible in the report grid preview.
  */
-export async function createTutorialGrid(params: {
+export async function createExplainerGrid(params: {
   videoPath: string;
   outPath: string;
   /** Number of frames on the grid (default 12). */
   count?: number;
-  /** Timestamp range of the final video showcase in the rendered tutorial. */
+  /** Timestamp range of the final video showcase in the rendered explainer. */
   finalShowcaseRange?: { startSec: number; durationSec: number };
 }): Promise<{ gridPath: string; frameCount: number }> {
   const count = params.count ?? 12;
   const durationSec = await probeDurationSec(params.videoPath);
-  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tutorial-grid-'));
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'explainer-grid-'));
   try {
     const frames: ExtractedFrame[] = [];
     const timestamps: number[] = [];
@@ -31,12 +31,12 @@ export async function createTutorialGrid(params: {
       const endSec = Math.min(durationSec, startSec + showcaseDur);
       // Allocate dedicated showcase slots (e.g. 4 frames out of 12 for a 3x4 grid)
       const showcaseCount = Math.max(2, Math.min(4, Math.floor(count / 3)));
-      const tutorialCount = count - showcaseCount;
+      const explainerCount = count - showcaseCount;
 
-      // Sample tutorial workflow/prompt steps up to the showcase start
-      const tutSpan = Math.max(0.1, startSec);
-      for (let i = 0; i < tutorialCount; i += 1) {
-        timestamps.push((tutSpan * (i + 0.5)) / tutorialCount);
+      // Sample explainer workflow/prompt steps up to the showcase start
+      const explainerSpan = Math.max(0.1, startSec);
+      for (let i = 0; i < explainerCount; i += 1) {
+        timestamps.push((explainerSpan * (i + 0.5)) / explainerCount);
       }
 
       // Sample final AI video showcase uniformly across its duration
@@ -80,3 +80,5 @@ export async function createTutorialGrid(params: {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
+
+export const createTutorialGrid = createExplainerGrid;

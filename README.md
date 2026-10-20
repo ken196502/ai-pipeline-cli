@@ -3,9 +3,11 @@
 独立的 X (Twitter) 热点追踪与解说视频自动化生产流水线。
 
 项目采用清晰的 **三层架构（utils/libs, modules, pipelines）** 设计：
-- **Layer 1: utils / libs** —— 领域无关的底层基础库与系统工具（浏览器 CDP 驱动、多模态 LLM 通信、媒体编解码/抽帧/拼图、OpusVideo 播放器与 Edge-TTS 渲染、环境变量加载、日志与通知）。
-- **Layer 2: modules** —— 5 个高内聚、低耦合的独立业务功能模块（`auth`、`discovery`、`evaluation`、`harvest`、`presentation`），支持单独测试（`test<Name>Module`）或独立 CLI 执行。
+- **Layer 1: utils / libs** —— 领域无关的底层基础库与系统工具（浏览器 CDP 驱动、多模态 LLM 通信、媒体编解码/抽帧/拼图、OpusVideo 画布播放器与 Edge-TTS 渲染、环境变量加载、日志与通知）。
+- **Layer 2: modules** —— 5 个高内聚、低耦合的独立业务功能模块（`auth`、`discovery`、`evaluation`、`harvest`、`explainer-video`），支持单独测试（`test<Name>Module`）或独立 CLI 执行。
 - **Layer 3: pipelines** —— 顶层端到端流程编排层，通过 `executeXHotPipeline` 串联 7 个阶段（`check-env` → `x-login` → `x-search-grid` → `x-eval` → `x-harvest` → `x-video` → `report`），统一调度各模块并生成交付报告与消息通知。
+
+> **架构规范特别说明**：本项目中**无任何 tutorial 概念**，视频生成子系统专指 **`explainer-video`（解说视频）** 模块。
 
 ---
 
@@ -47,8 +49,8 @@ xhot/
 │   │   │   ├── eval.ts / contracts.ts / cli.ts / index.ts (包含 testEvaluationModule)
 │   │   ├── harvest/                           # Module 4: 冠军话题深度素材采集
 │   │   │   ├── harvest.ts / contracts.ts / cli.ts / index.ts (包含 testHarvestModule)
-│   │   ├── presentation/                      # Module 5: 解说视频故事板与视频渲染
-│   │   │   ├── storyboard.ts / produce.ts / video.ts / cli.ts / index.ts (包含 testPresentationModule)
+│   │   ├── explainer-video/                   # Module 5: 解说视频故事板与视频渲染 (Explainer Video)
+│   │   │   ├── produce.ts / video.ts / cli.ts / contracts.ts / index.ts (包含 testExplainerVideoModule)
 │   │   └── index.ts                           # 统一导出与 testAllModules()
 │   │
 │   ├── pipelines/                             # 【Layer 3: 流水线编排调度层】
@@ -125,8 +127,8 @@ npm run module:evaluation -- path/to/grid.png
 # 运行模块 4: 对指定冠军话题深度采集推文与多媒体素材
 npm run module:harvest -- "Claude 3.7"
 
-# 运行模块 5: 渲染解说视频
-npm run module:presentation -- path/to/eval-result.json path/to/harvest-result.json
+# 运行模块 5: 渲染解说视频 (explainer-video)
+npm run module:explainer-video -- path/to/eval-result.json path/to/harvest-result.json
 ```
 
 ### 3. 运行 Layer 3 完整流水线
@@ -151,4 +153,3 @@ npm run xhot -- "sora video" --skip-video
 ```bash
 npm run build
 ```
-编译产物输出至 `dist/`，可直接作为可执行文件分发或通过 `npm link` 全局使用 `xhot` 命令。

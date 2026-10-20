@@ -32,17 +32,27 @@
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { TutorialTimeline, TutorialAsset, TutorialClip, TutorialShot } from './contracts.js';
+import type {
+  ExplainerTimeline,
+  ExplainerAsset,
+  ExplainerClip,
+  ExplainerShot,
+  TutorialTimeline,
+  TutorialAsset,
+  TutorialClip,
+  TutorialShot,
+} from './contracts.js';
 
-export interface WriteTutorialPlayerOptions {
-  timeline: TutorialTimeline;
+export interface WriteExplainerPlayerOptions {
+  timeline: ExplainerTimeline;
   /** lucide icon name -> SVG markup, inlined into the page. */
   icons: Record<string, string>;
-  /** Tutorial bundle directory (player files + assets/ + audio/). */
+  /** Explainer bundle directory (player files + assets/ + audio/). */
   outDir: string;
 }
+export type WriteTutorialPlayerOptions = WriteExplainerPlayerOptions;
 
-export interface TutorialPlayerFiles {
+export interface ExplainerPlayerFiles {
   htmlPath: string;
   cssPath: string;
   jsPath: string;
@@ -50,6 +60,7 @@ export interface TutorialPlayerFiles {
   /** Canonical id -> full prompt text store (prompt materials only). */
   promptsPath: string;
 }
+export type TutorialPlayerFiles = ExplainerPlayerFiles;
 
 /** Escapes JSON for safe inline embedding inside a <script> tag. */
 export function embedJson(value: unknown): string {
@@ -60,10 +71,10 @@ export function embedJson(value: unknown): string {
  * Normalizes timeline data: ensures clips exists, translating legacy scenes
  * if only scenes are provided.
  */
-export function normalizeTimeline(timeline: TutorialTimeline): {
+export function normalizeTimeline(timeline: ExplainerTimeline): {
   config: any;
   voice: any;
-  assets: TutorialAsset[];
+  assets: ExplainerAsset[];
   resolution: { width: number; height: number };
   fps: number;
 } {
@@ -71,12 +82,12 @@ export function normalizeTimeline(timeline: TutorialTimeline): {
   const height = timeline.resolution?.height || timeline.meta?.design?.h || 1080;
   const assets = timeline.assets || [];
 
-  let clips: TutorialClip[] = timeline.clips || [];
+  let clips: ExplainerClip[] = timeline.clips || [];
 
   // Translate legacy scenes if clips are not provided
   if ((!clips || clips.length === 0) && (timeline as any).scenes && Array.isArray((timeline as any).scenes)) {
     const rawScenes = (timeline as any).scenes;
-    let currentClip: TutorialClip | null = null;
+    let currentClip: ExplainerClip | null = null;
     let clipIndex = 0;
 
     for (let si = 0; si < rawScenes.length; si += 1) {
@@ -332,13 +343,18 @@ export const PLAYER_JS = `
     document.body.classList.add('render-mode');
   }
 
-  var config = JSON.parse(document.getElementById('tutorial-data').textContent);
-  var voice = JSON.parse(document.getElementById('tutorial-voice').textContent || 'null');
-  var iconData = JSON.parse(document.getElementById('tutorial-icons').textContent || '{}');
-  var assetList = JSON.parse(document.getElementById('tutorial-assets').textContent || '[]');
+  var getData = function (id1, id2) {
+    var el = document.getElementById(id1) || (id2 ? document.getElementById(id2) : null);
+    return el ? el.textContent : null;
+  };
+
+  var config = JSON.parse(getData('explainer-data', 'tutorial-data') || '{}');
+  var voice = JSON.parse(getData('explainer-voice', 'tutorial-voice') || 'null');
+  var iconData = JSON.parse(getData('explainer-icons', 'tutorial-icons') || '{}');
+  var assetList = JSON.parse(getData('explainer-assets', 'tutorial-assets') || '[]');
   var promptTexts = {};
   try {
-    promptTexts = JSON.parse(document.getElementById('tutorial-prompts').textContent || '{}') || {};
+    promptTexts = JSON.parse(getData('explainer-prompts', 'tutorial-prompts') || '{}') || {};
   } catch (promptParseError) {
     promptTexts = {};
   }
@@ -1930,7 +1946,7 @@ export const PLAYER_JS = `
     return Promise.resolve();
   }
 
-  window.__tutorial = {
+  window.__explainer = {
     seek: deterministicSeek,
     render: function (t) { return deterministicSeek(t); },
     get time() { return time; },
@@ -1945,40 +1961,44 @@ export const PLAYER_JS = `
     pause: function () { playing = false; },
     promptTextFor: promptTextFor
   };
-  window.__player = window.__tutorial;
+  window.__tutorial = window.__explainer;
+  window.__player = window.__explainer;
 
   // Initial draw after icon bitmaps settle — the ready flag gates both the
   // interactive preview and the headless frame-by-frame renderer.
   preloadIcons().then(function () {
     deterministicSeek(0);
+    window.__explainerReady = true;
     window.__tutorialReady = true;
   });
 })();
 `;
 
 /**
- * Writes the player bundle into the tutorial directory.
+ * Writes the player bundle into the explainer directory.
  */
-export async function writeTutorialPlayer(
-  options: WriteTutorialPlayerOptions
-): Promise<TutorialPlayerFiles> {
+export async function writeExplainerPlayer(
+  options: WriteExplainerPlayerOptions
+): Promise<ExplainerPlayerFiles> {
   const { timeline, icons, outDir } = options;
   await fs.mkdir(outDir, { recursive: true });
 
   const { config, voice, assets, resolution } = normalizeTimeline(timeline);
 
-  const htmlPath = path.join(outDir, 'tutorial-player.html');
-  const cssPath = path.join(outDir, 'tutorial-player.css');
-  const jsPath = path.join(outDir, 'tutorial-player.js');
-  const timelinePath = path.join(outDir, 'tutorial.json');
+  const htmlPath = path.join(outDir, 'explainer-player.html');
+  const cssPath = path.join(outDir, 'explainer-player.css');
+  const jsPath = path.join(outDir, 'explainer-player.js');
+  const timelinePath = path.join(outDir, 'explainer.json');
+  const legacyHtmlPath = path.join(outDir, 'tutorial-player.html');
+  const legacyCssPath = path.join(outDir, 'tutorial-player.css');
+  const legacyJsPath = path.join(outDir, 'tutorial-player.js');
+  const legacyTimelinePath = path.join(outDir, 'tutorial.json');
   const configPath = path.join(outDir, 'config.json');
   const voicePath = path.join(outDir, 'voice.json');
   const promptsPath = path.join(outDir, 'prompts.json');
 
-  // Prompt materials stay SYMBOLIC in every script JSON (tutorial.json,
-  // config.json and the inline asset list): only id/kind/label/clipIndex are
-  // carried. Full prompt texts are extracted once into prompts.json and
-  // inlined as a dedicated tutorial-prompts block the player parses at boot.
+  // Prompt materials stay SYMBOLIC in every script JSON:
+  // only id/kind/label/clipIndex are carried. Full prompt texts are extracted once into prompts.json.
   const promptTexts: Record<string, string> = {};
   const symbolicAssets = assets.map((asset) => {
     if (asset.kind !== 'prompt') return asset;
@@ -2009,19 +2029,19 @@ export async function writeTutorialPlayer(
     .filter(Boolean)
     .join('\n');
 
-  const html = `<!doctype html>
+  const buildHtml = (cssFilename: string, jsFilename: string) => `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${config.meta.title}</title>
-  <link rel="stylesheet" href="tutorial-player.css" />
+  <link rel="stylesheet" href="${cssFilename}" />
   <script>
     if (location.search.indexOf('render=1') !== -1 || window.__RENDER_MODE__) {
       document.documentElement.classList.add('render-mode');
     }
   </script>
-  <script>window.__tutorial = null; window.__tutorialReady = false;</script>
+  <script>window.__explainer = null; window.__explainerReady = false; window.__tutorial = null; window.__tutorialReady = false;</script>
 </head>
 <body>
   <canvas id="stage" width="${resolution.width}" height="${resolution.height}"></canvas>
@@ -2050,6 +2070,14 @@ ${mediaTags}
   <div class="col col-prompt"><div class="prompt-text"></div></div>
   <div class="col col-chat"><div class="chat-card"><div class="bubble-user"></div><div class="bubble-bot"></div></div></div>
 
+  <script id="explainer-data" type="application/json">${configJson}</script>
+  <script id="explainer-voice" type="application/json">${voiceJson}</script>
+  <script id="explainer-icons" type="application/json">${iconsJson}</script>
+  <script id="explainer-assets" type="application/json">${assetsJson}</script>
+  ${promptAssetIds.length > 0 ? `<script id="explainer-prompts" type="application/json">${promptsJson}</script>` : ''}
+  <script id="explainer-timeline" type="application/json">${timelineJson}</script>
+
+  <!-- Fallback script elements for backward compatibility -->
   <script id="tutorial-data" type="application/json">${configJson}</script>
   <script id="tutorial-voice" type="application/json">${voiceJson}</script>
   <script id="tutorial-icons" type="application/json">${iconsJson}</script>
@@ -2057,7 +2085,7 @@ ${mediaTags}
   ${promptAssetIds.length > 0 ? `<script id="tutorial-prompts" type="application/json">${promptsJson}</script>` : ''}
   <script id="tutorial-timeline" type="application/json">${timelineJson}</script>
 
-  <script src="tutorial-player.js"></script>
+  <script src="${jsFilename}"></script>
 </body>
 </html>
 `;
@@ -2069,11 +2097,20 @@ ${mediaTags}
     scenes: (timeline as any).scenes && (timeline as any).scenes.length > 0 ? (timeline as any).scenes : config.scenes,
   };
 
+  const timelineJsonContent = JSON.stringify(timelineWithScenes, null, 2) + '\n';
+  const explainerHtml = buildHtml('explainer-player.css', 'explainer-player.js');
+  const legacyHtml = buildHtml('tutorial-player.css', 'tutorial-player.js');
+
   await Promise.all([
-    fs.writeFile(htmlPath, html, 'utf-8'),
+    fs.writeFile(htmlPath, explainerHtml, 'utf-8'),
     fs.writeFile(cssPath, PLAYER_CSS, 'utf-8'),
     fs.writeFile(jsPath, PLAYER_JS, 'utf-8'),
-    fs.writeFile(timelinePath, JSON.stringify(timelineWithScenes, null, 2) + '\n', 'utf-8'),
+    fs.writeFile(timelinePath, timelineJsonContent, 'utf-8'),
+    // Also write legacy aliases so nothing ever breaks
+    fs.writeFile(legacyHtmlPath, legacyHtml, 'utf-8'),
+    fs.writeFile(legacyCssPath, PLAYER_CSS, 'utf-8'),
+    fs.writeFile(legacyJsPath, PLAYER_JS, 'utf-8'),
+    fs.writeFile(legacyTimelinePath, timelineJsonContent, 'utf-8'),
     fs.writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8'),
     fs.writeFile(voicePath, JSON.stringify(voice, null, 2) + '\n', 'utf-8'),
     fs.writeFile(promptsPath, JSON.stringify(promptTexts, null, 2) + '\n', 'utf-8'),
@@ -2081,3 +2118,5 @@ ${mediaTags}
 
   return { htmlPath, cssPath, jsPath, timelinePath, promptsPath };
 }
+
+export const writeTutorialPlayer = writeExplainerPlayer;

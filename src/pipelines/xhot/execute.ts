@@ -14,7 +14,7 @@ import { ensureXLogin } from '../../modules/auth/auth.js';
 import { searchXCandidates, buildXHotGrid, type XHotCandidate } from '../../modules/discovery/index.js';
 import { evaluateXHotCandidatesWithVL, type XHotEvalResult } from '../../modules/evaluation/index.js';
 import { harvestWinnerTopicMaterials, type XHotHarvestResult } from '../../modules/harvest/index.js';
-import { createXHotPresentationVideo } from '../../modules/presentation/index.js';
+import { createExplainerVideo } from '../../modules/explainer-video/index.js';
 import { generateXHotMarkdown, generateXHotJson, printXHotSummary } from './report.js';
 import type { Pipeline } from '../core/contracts.js';
 
@@ -90,7 +90,7 @@ export async function executeXHotPipeline(
   let gridPath = '';
   let evalResult: XHotEvalResult | undefined;
   let harvestResult: XHotHarvestResult | undefined;
-  let tutorialSummary: any = undefined;
+  let explainerSummary: any = undefined;
 
   try {
     // Stage 2: X Persistent Login (Auth Module)
@@ -176,19 +176,19 @@ export async function executeXHotPipeline(
     }
   }
 
-  // Stage 6: Video Generation (Presentation Module)
+  // Stage 6: Video Generation (Explainer Video Module)
   if (!options.skipVideo && evalResult && harvestResult) {
-    notify('x-video', 'Stage 6/7: Generating presentation video via OpusVideo tutorial canvas engine');
+    notify('x-video', 'Stage 6/7: Generating explainer video via OpusVideo explainer canvas engine');
     const stage6Start = Date.now();
     try {
-      tutorialSummary = await createXHotPresentationVideo({
+      explainerSummary = await createExplainerVideo({
         query: options.query,
         evalResult,
         harvestResult,
         outDir,
-        fps: options.tutorialFps,
-        engine: options.tutorialEngine,
-        subtitles: options.tutorialSubtitles,
+        fps: options.explainerFps ?? options.tutorialFps,
+        engine: options.explainerEngine ?? options.tutorialEngine,
+        subtitles: options.explainerSubtitles ?? options.tutorialSubtitles,
         ttsVoice: options.ttsVoice,
         ttsRate: options.ttsRate,
         profileDir,
@@ -198,14 +198,14 @@ export async function executeXHotPipeline(
         'x-video',
         'completed',
         Date.now() - stage6Start,
-        `Rendered presentation video (${tutorialSummary.totalDurationSec.toFixed(1)}s, ${tutorialSummary.sceneCount} scenes)`
+        `Rendered explainer video (${explainerSummary.totalDurationSec.toFixed(1)}s, ${explainerSummary.sceneCount} scenes)`
       );
     } catch (err: any) {
-      recordStage('x-video', 'failed', Date.now() - stage6Start, 'Presentation video rendering failed', err.message);
-      logger.error('Failed to render presentation video:', err);
+      recordStage('x-video', 'failed', Date.now() - stage6Start, 'Explainer video rendering failed', err.message);
+      logger.error('Failed to render explainer video:', err);
     }
   } else {
-    recordStage('x-video', 'skipped', 0, 'Presentation video stage skipped (--skip-video)');
+    recordStage('x-video', 'skipped', 0, 'Explainer video stage skipped (--skip-video)');
   }
 
   // Stage 7: Report Generation
@@ -226,7 +226,8 @@ export async function executeXHotPipeline(
     topCandidates: evalResult?.topCandidates,
     gridImagePath: gridPath,
     harvestResult,
-    tutorial: tutorialSummary,
+    explainer: explainerSummary,
+    tutorial: explainerSummary,
     stages,
     envCheck,
   };
@@ -242,7 +243,7 @@ export async function executeXHotPipeline(
 export const xhotPipeline: Pipeline<XHotPipelineOptions, XHotFullResult> = {
   id: 'xhot',
   name: 'Xhot Trending Video Pipeline',
-  description: 'Search trending topics on X, rank with VL grid evaluation, harvest materials, and render presentation video',
+  description: 'Search trending topics on X, rank with VL grid evaluation, harvest materials, and render explainer video',
   schema: XHotPipelineOptionsSchema,
   stages: XHOT_STAGES,
   execute: executeXHotPipeline,
