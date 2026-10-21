@@ -31,3 +31,27 @@ export interface Pipeline<TOptions = any, TResult = any> {
     printSummary?: (result: TResult) => void;
   };
 }
+
+export interface TopicScheduleState {
+  version: 1;
+  maxRunsPer24h: number;
+  lastRunIndex: number;
+  topics: Record<string, number[]>;
+}
+
+export interface Pipeline24hOptions<TOptions = any, TResult = any> {
+  pipelineId?: string;
+  pipeline?: Pipeline<TOptions, TResult>;
+  topics: string[];
+  maxRunsPer24h?: number;
+  stateFilePath?: string;
+  errorCooldownMs?: number;
+  windowMs?: number;
+  signal?: AbortSignal;
+  executeFn?: (topic: string, roundIndex: number) => Promise<TResult>;
+  createOptions?: (topic: string) => TOptions;
+  onRoundStart?: (topic: string, roundIndex: number, runCountIn24h: number) => void | Promise<void>;
+  onRoundSuccess?: (topic: string, result: TResult, roundIndex: number) => void | Promise<void>;
+  onRoundError?: (topic: string, error: unknown, roundIndex: number) => void | Promise<void>;
+  onSleep?: (topic: string, waitMs: number, reason: string) => void | Promise<void>;
+}

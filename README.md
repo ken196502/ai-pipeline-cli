@@ -1,21 +1,22 @@
-# Xhot: Trending Video Pipeline
+# AIGC Pipeline Platform
 
-独立的 X (Twitter) 热点追踪与解说视频自动化生产流水线。
+多流水线 AIGC 自动化生产框架。采用清晰的 **三层架构（utils/libs, modules, pipelines）** 设计，支持以插件化方式扩展多条独立流水线。
 
-项目采用清晰的 **三层架构（utils/libs, modules, pipelines）** 设计：
-- **Layer 1: utils / libs** —— 领域无关的底层基础库与系统工具（浏览器 CDP 驱动、多模态 LLM 通信、媒体编解码/抽帧/拼图、OpusVideo 画布播放器与 Edge-TTS 渲染、环境变量加载、日志与通知）。
-- **Layer 2: modules** —— 5 个高内聚、低耦合的独立业务功能模块（`auth`、`discovery`、`evaluation`、`harvest`、`explainer-video`），支持单独测试（`test<Name>Module`）或独立 CLI 执行。
-- **Layer 3: pipelines** —— 顶层端到端流程编排层，通过 `executeXHotPipeline` 串联 7 个阶段（`check-env` → `x-login` → `x-search-grid` → `x-eval` → `x-harvest` → `x-video` → `report`），统一调度各模块并生成交付报告与消息通知。
+当前已集成的流水线：
 
-> **架构规范特别说明**：本项目中**无任何 tutorial 概念**，视频生成子系统专指 **`explainer-video`（解说视频）** 模块。
+| Pipeline ID | 名称 | 描述 |
+|---|---|---|
+| `xhot` | Xhot Trending Video | X (Twitter) 热点追踪 → VL 评估 → 素材采集 → 解说视频自动渲染 |
+
+> 更多流水线（如 YouTube Shorts 自动化、Reddit 热帖视频等）可通过 `src/pipelines/<id>/` 目录结构快速接入。
 
 ---
 
 ## 🏛️ 三层架构详解
 
 ```
-xhot/
-├── .env -> /Users/FrankLin/VM/VideoGen/.env    # 软链接共享 .env 配置
+AIGC-pipeline/
+├── .env -> ../VideoGen/.env                   # 软链接共享 .env 配置
 ├── package.json
 ├── tsconfig.json
 ├── tools/
@@ -31,6 +32,7 @@ xhot/
 │   │   ├── cookies.ts                         # Netscape Cookie 格式化与解析
 │   │   ├── text.ts                            # 文本过滤与关键词脱敏
 │   │   ├── run.ts                             # RunID 生成与输出目录确保
+│   │   ├── time.ts                            # 时间格式化工具
 │   │   └── index.ts
 │   │
 │   ├── libs/                                  # 【Layer 1B: 底层基础设施库层】
@@ -42,32 +44,33 @@ xhot/
 │   │
 │   ├── modules/                               # 【Layer 2: 业务功能模块层】
 │   │   ├── auth/                              # Module 1: X (Twitter) 登录与会话维持
-│   │   │   ├── auth.ts / contracts.ts / cli.ts / index.ts (包含 testAuthModule)
 │   │   ├── discovery/                         # Module 2: 话题发现与候选推文拼图
-│   │   │   ├── search.ts / grid.ts / contracts.ts / cli.ts / index.ts (包含 testDiscoveryModule)
 │   │   ├── evaluation/                        # Module 3: 多模态 VL 视觉模型综合评估
-│   │   │   ├── eval.ts / contracts.ts / cli.ts / index.ts (包含 testEvaluationModule)
 │   │   ├── harvest/                           # Module 4: 冠军话题深度素材采集
-│   │   │   ├── harvest.ts / contracts.ts / cli.ts / index.ts (包含 testHarvestModule)
-│   │   ├── explainer-video/                   # Module 5: 解说视频故事板与视频渲染 (Explainer Video)
-│   │   │   ├── produce.ts / video.ts / cli.ts / contracts.ts / index.ts (包含 testExplainerVideoModule)
+│   │   ├── explainer-video/                   # Module 5: 解说视频故事板与视频渲染
 │   │   └── index.ts                           # 统一导出与 testAllModules()
 │   │
 │   ├── pipelines/                             # 【Layer 3: 流水线编排调度层】
-│   │   ├── core/                              # Pipeline、PipelineStageDef、PipelineRegistry、Context
-│   │   ├── xhot/                              # xhot 7 阶段全流程流水线
+│   │   ├── core/                              # 通用 Pipeline 框架
+│   │   │   ├── contracts.ts                   # Pipeline / PipelineStageDef / Pipeline24hOptions 类型定义
+│   │   │   ├── context.ts                     # PipelineExecutionContext 运行时上下文
+│   │   │   ├── registry.ts                    # PipelineRegistry 注册中心 (含 run24h)
+│   │   │   └── runner.ts                      # 24H 连续调度器 (ContinuousTopicScheduler / runPipeline24h)
+│   │   ├── xhot/                              # 🔥 Xhot 7 阶段全流程流水线
 │   │   │   ├── stages/check-env.ts            # Stage 1: 环境预检
 │   │   │   ├── execute.ts                     # Stage 1..7 调度执行引擎
 │   │   │   ├── report.ts                      # Markdown 与 JSON 报告生成
 │   │   │   ├── contracts.ts                   # 流水线选项与完整产物规范
-│   │   │   └── cli.ts                         # 流水线 CLI 入口
-│   │   └── index.ts                           # 流水线注册中心
+│   │   │   └── cli.ts                         # 流水线 CLI 子命令入口
+│   │   └── index.ts                           # 流水线注册中心 (自动注册所有 pipelines)
 │   │
-│   ├── cli.ts                                 # 顶层 CLI 入口 (`xhot` 命令)
-│   └── index.ts                               # 顶层库导出入口 (utils, libs, modules, pipelines)
+│   ├── cli.ts                                 # 顶层 CLI 入口 (`aigc` 多命令路由)
+│   └── index.ts                               # 顶层库导出入口
+│
 └── tests/
     ├── modules.test.ts                        # 5 个业务模块的一对一独立自测套件
-    └── xhot-pipeline.test.ts                  # xhot 全流程端到端集成测试套件
+    ├── runner-24h.test.ts                     # 24H 连续调度器与 Runner 测试套件
+    └── xhot-pipeline.test.ts                  # Xhot 全流程端到端集成测试套件
 ```
 
 ---
@@ -103,53 +106,75 @@ NOTIFY_TO=...
 
 ### 1. 运行测试
 ```bash
-# 运行所有测试（包含 5 个模块的单模块自测与 Pipeline 完整测试）
+# 运行全部测试（模块 + 流水线 + 调度器）
 npm test
 
-# 仅测试 Layer 2 业务模块 (逐一自测)
+# 仅测试 Layer 2 业务模块
 npm run test:modules
 
-# 仅测试 Layer 3 流水线
+# 仅测试 Xhot 流水线
 npm run test:pipeline
+
+# 仅测试 24H Runner 调度器
+npm run test:runner
 ```
 
 ### 2. 独立运行 Layer 2 业务模块
 ```bash
-# 运行模块 1: X 平台鉴权状态检查与登录
 npm run module:auth
-
-# 运行模块 2: 话题发现与候选卡片拼图
 npm run module:discovery -- "deepseek r1"
-
-# 运行模块 3: 多模态 VL 评估已有的拼图
 npm run module:evaluation -- path/to/grid.png
-
-# 运行模块 4: 对指定冠军话题深度采集推文与多媒体素材
 npm run module:harvest -- "Claude 3.7"
-
-# 运行模块 5: 渲染解说视频 (explainer-video)
 npm run module:explainer-video -- path/to/eval-result.json path/to/harvest-result.json
 ```
 
-### 3. 运行 Layer 3 完整流水线
+### 3. 运行 Xhot 流水线
+
 ```bash
-# Dry-run 仿真模式（不消耗网络和点数）
-npm run xhot -- "new model" --dry-run
+# 通过 aigc 多命令 CLI
+npm run aigc -- xhot "new model"
+npm run aigc -- xhot --dry-run
 
-# 默认搜索 "new model"
-npm run xhot
+# 直接快捷方式
+npm run xhot -- "new model"
+npm run xhot -- "deepseek r1" --dry-run
 
-# 指定搜索话题
-npm run xhot -- "deepseek r1"
+# 多话题单次顺序执行（分号分隔）
+npm run aigc -- xhot --topics "AI;new model;deepseek r1"
 
-# 自定义参数：抓取 12 个候选，仅筛选 48 小时内的推文，显示有头浏览器
-npm run xhot -- "claude 3.7" --candidate-count 12 --max-age-hours 48 --headed
+# 24H 连续循环模式（顺序执行，永不停止，每话题 24 小时默认最多 1 次）
+npm run aigc -- xhot --topics "AI;new model;deepseek r1" --24h
 
-# 跳过视频渲染，仅收集热点素材和评估报告
-npm run xhot -- "sora video" --skip-video
+# 24H 连续循环模式（自定义限制：每话题 24 小时最多 2 次）
+npm run aigc -- xhot --topics "AI;new model;deepseek r1" --24h 2
+
+# 自定义参数
+npm run aigc -- xhot "claude 3.7" --candidate-count 12 --max-age-hours 48 --headed
+
+# 跳过视频渲染
+npm run aigc -- xhot "sora video" --skip-video
 ```
 
-### 4. 编译构建
+### 4. 查看帮助
+```bash
+# 查看全部可用流水线
+npm run aigc -- --help
+
+# 查看 Xhot 流水线参数
+npm run aigc -- xhot --help
+```
+
+### 5. 编译构建
 ```bash
 npm run build
 ```
+
+---
+
+## 🔌 添加新流水线
+
+1. 在 `src/pipelines/` 下新建目录，如 `src/pipelines/yt-shorts/`
+2. 实现 `contracts.ts`、`execute.ts`、`cli.ts`，导出符合 `Pipeline<TOptions, TResult>` 接口的对象
+3. 在 `src/pipelines/index.ts` 中 import 并 `pipelineRegistry.register(yourPipeline)`
+4. 在 `src/cli.ts` 中添加对应的 `program.command('yt-shorts')` 子命令
+5. 新流水线自动获得 24H Runner、注册中心、状态持久化等全部 Core 能力

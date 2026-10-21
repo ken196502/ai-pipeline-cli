@@ -1,15 +1,17 @@
 {
-  "name": "xhot",
-  "version": "1.0.0",
-  "description": "Xhot Trending Video Pipeline: Discover hot topics on X, rank with VL grid, harvest materials, and render presentation videos",
+  "name": "aigc-pipeline",
+  "version": "2.0.0",
+  "description": "AIGC Pipeline Platform: Multi-pipeline AIGC automation framework. Currently includes the Xhot trending video pipeline with more pipelines to come.",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
+    "aigc": "./dist/cli.js",
     "xhot": "./dist/cli.js"
   },
   "scripts": {
     "start": "tsx src/cli.ts",
-    "xhot": "tsx src/cli.ts",
+    "aigc": "tsx src/cli.ts",
+    "xhot": "tsx src/cli.ts xhot",
     "module:auth": "tsx src/modules/auth/cli.ts",
     "module:discovery": "tsx src/modules/discovery/cli.ts",
     "module:evaluation": "tsx src/modules/evaluation/cli.ts",
@@ -17,13 +19,15 @@
     "module:explainer-video": "tsx src/modules/explainer-video/cli.ts",
     "module:explainer": "tsx src/modules/explainer-video/cli.ts",
     "module:presentation": "tsx src/modules/explainer-video/cli.ts",
-    "pipeline:xhot": "tsx src/pipelines/xhot/cli.ts",
+    "pipeline:xhot": "tsx src/cli.ts xhot",
     "build": "tsc",
     "test": "tsx --test tests/*.test.ts",
     "test:modules": "tsx --test tests/modules.test.ts",
-    "test:pipeline": "tsx --test tests/xhot-pipeline.test.ts"
+    "test:pipeline": "tsx --test tests/xhot-pipeline.test.ts",
+    "test:runner": "tsx --test tests/runner-24h.test.ts"
   },
   "dependencies": {
+    "@esbuild/linux-arm64": "^0.28.2",
     "commander": "^13.1.0",
     "lucide-static": "^1.47.0",
     "picocolors": "^1.1.1",

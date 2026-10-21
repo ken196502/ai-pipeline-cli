@@ -35,3 +35,6 @@ tutorial-preview/
 
 # Environment
 .env
+
+# Runner state
+runner-24h-state.json

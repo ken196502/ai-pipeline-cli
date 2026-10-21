@@ -14,6 +14,20 @@ export function formatDuration(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+export function formatDurationMs(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${seconds}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
+}
+
 export function roundSeconds(sec: number, decimals = 2): number {
   const factor = 10 ** decimals;
   return Math.round(sec * factor) / factor;

@@ -27,7 +27,7 @@ export function getProjectRootDir(): string {
       if (fsSync.existsSync(path.join(curr, 'package.json'))) {
         try {
           const pkg = JSON.parse(fsSync.readFileSync(path.join(curr, 'package.json'), 'utf8'));
-          if (pkg.name === 'xhot' || pkg.name === 'yt-cookie-exporter' || (pkg.bin && (pkg.bin['xhot'] || pkg.bin['flow-cli']))) {
+          if (pkg.name === 'aigc-pipeline' || pkg.name === 'xhot' || pkg.name === 'yt-cookie-exporter' || (pkg.bin && (pkg.bin['aigc'] || pkg.bin['xhot'] || pkg.bin['flow-cli']))) {
             return curr;
           }
         } catch {}

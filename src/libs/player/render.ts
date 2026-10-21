@@ -83,9 +83,9 @@ export function resolveFirefoxRenderProfileDir(): string {
   }
   const snapCommon = path.join(os.homedir(), 'snap', 'firefox', 'common');
   if (fs.existsSync(snapCommon)) {
-    return path.join(snapCommon, 'xhot-render', 'profile');
+    return path.join(snapCommon, 'aigc-render', 'profile');
   }
-  return path.join(os.tmpdir(), 'xhot-render-firefox-profile');
+  return path.join(os.tmpdir(), 'aigc-render-firefox-profile');
 }
 
 /** Minimal static file server used to host the explainer bundle for the player. */
@@ -376,7 +376,7 @@ export async function renderExplainerVideo(
           }
         } catch {}
 
-        const workerProfileDir = path.join(os.tmpdir(), `xhot-render-ff-w${workerId}-${Date.now()}`);
+        const workerProfileDir = path.join(os.tmpdir(), `aigc-render-ff-w${workerId}-${Date.now()}`);
         await fsp.mkdir(workerProfileDir, { recursive: true });
 
         let chunkBrowser: Browser | BrowserContext | null = null;

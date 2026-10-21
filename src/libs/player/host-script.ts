@@ -352,9 +352,9 @@ SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
 EXPLAINER_DIR="\$SCRIPT_DIR"
 cd "\$EXPLAINER_DIR"
 
-log() { printf "\\033[1;36m[xhot-render]\\033[0m %s\\n" "\$*"; }
-info() { printf "\\033[1;30m[xhot-render]\\033[0m %s\\n" "\$*"; }
-fail() { printf "\\033[1;31m[xhot-render] ERROR:\\033[0m %s\\n" "\$*" >&2; exit 1; }
+log() { printf "\\033[1;36m[aigc-render]\\033[0m %s\\n" "\$*"; }
+info() { printf "\\033[1;30m[aigc-render]\\033[0m %s\\n" "\$*"; }
+fail() { printf "\\033[1;31m[aigc-render] ERROR:\\033[0m %s\\n" "\$*" >&2; exit 1; }
 
 log "Starting Host-Side Explainer Video Render..."
 

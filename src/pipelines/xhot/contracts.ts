@@ -24,6 +24,8 @@ export const XHotPipelineOptionsSchema = z.object({
   ttsVoice: z.string().optional(),
   ttsRate: z.string().default('+0%'),
   dryRun: z.boolean().default(false),
+  twentyFourHour: z.union([z.boolean(), z.number().int().min(1)]).optional(),
+  topics: z.union([z.string(), z.array(z.string())]).optional(),
 });
 export type XHotPipelineOptions = z.infer<typeof XHotPipelineOptionsSchema>;
 
