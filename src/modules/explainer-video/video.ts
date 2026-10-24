@@ -26,7 +26,7 @@ export async function buildExplainerAssets(
   await fs.mkdir(assetsOutDir, { recursive: true });
   const assets: ExplainerAsset[] = [];
 
-  // 1. Candidate Grid
+  // 1. Candidate Grid & Individual Candidate Shots (Flash Montage)
   if (evalResult.gridImagePath) {
     try {
       const ext = path.extname(evalResult.gridImagePath) || '.png';
@@ -39,6 +39,26 @@ export async function buildExplainerAssets(
         src: `assets/${path.basename(dest)}`,
         sourcePath: dest,
       });
+    } catch {}
+
+    // Check for candidate-shots directory next to gridImagePath
+    try {
+      const candShotsDir = path.join(path.dirname(evalResult.gridImagePath), 'candidate-shots');
+      const candEntries = await fs.readdir(candShotsDir).catch(() => []);
+      for (const entry of candEntries.sort()) {
+        if (!entry.endsWith('.png') && !entry.endsWith('.jpg') && !entry.endsWith('.jpeg')) continue;
+        const srcPath = path.join(candShotsDir, entry);
+        const destPath = path.join(assetsOutDir, entry);
+        await fs.copyFile(srcPath, destPath);
+        const candId = entry.replace(/\.[^.]+$/, '');
+        assets.push({
+          id: candId,
+          kind: 'image',
+          label: `Trending Candidate: ${candId}`,
+          src: `assets/${entry}`,
+          sourcePath: destPath,
+        });
+      }
     } catch {}
   }
 
@@ -113,12 +133,21 @@ export async function generateExplainerStoryboardFromXHot(
     );
   }
 
-  const systemPrompt = `You are an elite technology video director and documentary producer.
-You craft punchy, highly engaging documentary and introduction videos about breaking tech announcements and hot AI models based on X (Twitter) trending discussions.
+  const systemPrompt = `You are a world-class technology journalist, lead documentary director, and analytical narrator.
+You craft calm, authoritative, deeply informative, and engaging documentary videos about breaking tech announcements and hot AI models based on X (Twitter) trending discussions.
 The presentation is rendered using the OpusVideo canvas procedural engine with a split layout:
 - Left column: punchy 3-8 word takeaway phrases with highlight pops
-- Right column: matching visual material (tweet screenshots, media demos, candidate grids, or lucide icons like 'sparkles', 'zap', 'flame', 'award', 'trending-up', 'cpu')
-Each shot has an elements array of [phraseText, visualRef] and an 1:1 matching spoken narration sentence.`;
+- Right column: matching visual material:
+  * "flash" component: for rapid, cinematic split-second cutaways across trending candidate tweets (e.g. "flash" or "flash:candidates")
+  * Tweet screenshots (e.g. 'tweet-01-shot', 'tweet-02-shot')
+  * Live demo videos & media previews (e.g. 'tweet-01-video-1', 'tweet-02-image-1')
+  * Lucide vector icons ('sparkles', 'zap', 'flame', 'award', 'trending-up', 'cpu', 'code', 'globe')
+
+Tone & Narration Voice Guidelines:
+- Tone must be calm, steady, insightful, professional, and natural.
+- STRICTLY AVOID sensationalist, theatrical, or over-excited clickbait wording (e.g. DO NOT say "reaches a fever pitch", "exploded", "insane", "unbelievable jaw-dropping", "community goes crazy").
+- Do NOT jump back and forth with erratic emotional spikes. The narrative flow should be smooth, cohesive, and thoughtful, like a high-end Bloomberg Technology or Vox Explained mini-documentary.
+- Each shot has an elements array of [phraseText, visualRef] and an 1:1 matching spoken narration sentence.`;
 
   const userPrompt = `【Trending Winner / Topic】
 - Winner: ${evalResult.winner.name} (Rank #1)
@@ -136,43 +165,44 @@ ${tweetSummaries}
 
 【Requirements】
 1. Structure the presentation video into 4 or 5 concise chapters:
-   - Chapter 0 (Overview/Hook): Breaking news hook & how this topic topped the X leaderboard (visualRef: 'xhot-candidate-grid' or icon 'flame'/'award').
-   - Chapter 1 (The Winner Announcement): Dive into ${evalResult.winner.name}, its core breakthrough, and why the tech community went crazy.
-   - Chapter 2 (Community Reactions & Proof): Showcase real user reactions and tweet cards (use tweet shot assets like 'tweet-01-shot', 'tweet-02-shot').
-   - Chapter 3 (Live Demos / Visual Showcase): Feature any demo video or media image assets from the tweets (e.g. 'tweet-01-video-1', 'tweet-01-image-1', etc.).
-   - Chapter 4 (Future & Takeaway): Final perspective and impact summary.
+   - Chapter 0 (Overview/Hook): The emerging topic and trending landscape on X.
+     * IMPORTANT: For the opening hook, DO NOT use a static candidate grid ('xhot-candidate-grid'). Instead, use visualRef: 'flash' (or 'flash:candidates') so the video dynamically cuts through candidate snapshots in a fast-paced montage!
+   - Chapter 1 (The Winner Announcement): Introduce ${evalResult.winner.name}, its core technical capability, and why it ranks at the top.
+   - Chapter 2 (Community Reactions & Proof): Showcase real discussions and user reaction tweets (use tweet shot assets like 'tweet-01-shot', 'tweet-02-shot').
+   - Chapter 3 (Live Demos / Visual Showcase): Feature demo video or media image assets from the tweets (e.g. 'tweet-01-video-1', 'tweet-01-image-1', etc.).
+   - Chapter 4 (Future & Perspective): Strategic industry context and balanced forward takeaway.
 2. In each shot:
    - Provide 2 to 3 elements.
-   - Every phraseText must be 3-8 words, punchy and clear.
-   - visualRef MUST strictly match either an asset ID from the Available Assets above, or a valid lucide icon ('sparkles', 'zap', 'flame', 'code', 'trending-up', 'award', 'globe', 'cpu').
-   - Provide matching spoken narration sentences in English (1 sentence per element).
+   - Every phraseText must be 3-8 words, clear, concise, and professional.
+   - visualRef MUST strictly match either 'flash', an asset ID from the Available Assets above, or a valid lucide icon ('sparkles', 'zap', 'flame', 'code', 'trending-up', 'award', 'globe', 'cpu').
+   - Spoken narration sentences must be delivered in natural, composed, measured English (1 sentence per element).
 3. Return PURE JSON adhering to the OpusVideo Storyboard format:
 {
-  "title": "${evalResult.winner.name}: Breaking X Viral Hotspot",
+  "title": "${evalResult.winner.name}: Analysis & Overview",
   "subtitle": "Deep Dive into the #1 Trending Topic on X",
   "meta": {
     "title": "${evalResult.winner.name}",
-    "subtitle": "Breaking X Viral Hotspot",
+    "subtitle": "Trending Overview",
     "bg": "#0B0F19",
     "accent": "#00F0FF"
   },
   "clips": [
     {
       "id": "c0_hook",
-      "kicker": "00 · TRENDING",
-      "title": "Viral On X",
-      "subtitle": "Top Technology Surge",
+      "kicker": "00 · OVERVIEW",
+      "title": "Trending On X",
+      "subtitle": "Global Technology Overview",
       "bg": "#0B0F19",
       "shots": [
         {
           "id": "s0_1",
           "elements": [
-            ["Global Tech Trends Explode", "xhot-candidate-grid"],
-            ["The Number One Breakthrough", "flame"]
+            ["Emerging AI Breakthroughs", "flash"],
+            ["GPT-6.3 Sol Leads Focus", "flame"]
           ],
           "narration": [
-            "Tech discourse on X reached a fever pitch today with massive attention around new developments.",
-            "Rising above all candidates, one major milestone captured everyone's focus."
+            "Today's tech conversations across X centered on significant new announcements and emerging models.",
+            "Among the contenders, OpenAI's GPT-6.3 Sol emerged at the forefront of developer discussions."
           ]
         }
       ]
@@ -248,8 +278,9 @@ export async function createExplainerVideo(
     height,
     engine,
     subtitles,
-    ttsVoice: options.ttsVoice || 'en-US-ChristopherNeural',
+    ttsVoice: options.ttsVoice || 'Ryan',
     ttsRate,
+    ttsInstruct: 'Speak in a calm, steady, composed, professional documentary narrator tone. Avoid theatrical excitement or erratic pitch changes.',
     browserPath: options.browserPath,
     resultFilename: 'explainer-result.json',
     storyboardFilename: '10-explainer-storyboard.json',

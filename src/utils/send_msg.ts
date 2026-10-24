@@ -60,6 +60,22 @@ export function getWebhookConfig(override?: Partial<WebhookConfig>): WebhookConf
 }
 
 /**
+ * True when the process runs inside a test runner. Real external alerts
+ * (Telegram webhook / Pi inbound) must never fire from tests — a test that
+ * exercises an error path would otherwise page a human for a fake failure.
+ */
+export function isTestEnvironment(): boolean {
+  if (typeof process === 'undefined') return false;
+  return Boolean(
+    process.env.NODE_TEST_CONTEXT ||
+      process.env.VITEST ||
+      process.env.JEST_WORKER_ID ||
+      process.env.NODE_ENV === 'test' ||
+      (process.argv[1] && /(?:^|\/)tests?\/.*\.test\.[cm]?[jt]s$/i.test(process.argv[1]))
+  );
+}
+
+/**
  * Sends a notification message via the webhook endpoint.
  * When `attachment` is provided, the gateway delivers the referenced file as
  * a document and uses `message` as its caption.
@@ -71,6 +87,13 @@ export async function sendMsg(
   attachment?: WebhookAttachment
 ): Promise<WebhookSendResult> {
   const config = getWebhookConfig(overrideConfig);
+
+  // Test runs must not page a human. An explicit overrideConfig means the test
+  // is driving its own mock server, which is allowed.
+  if (isTestEnvironment() && !overrideConfig?.webhookUrl) {
+    console.log(pc.dim(`[send_msg] Suppressed real Telegram message in test environment: ${message.slice(0, 80)}`));
+    return { ok: true, to: config.notifyTo, raw: { suppressed: true } };
+  }
 
   if (attachment && (!attachment.filePath || !attachment.filePath.trim())) {
     throw new Error('[send_msg] attachment.filePath must be a non-empty string');
@@ -173,6 +196,10 @@ export async function sendToPi(
   message: string,
   overrideConfig?: Partial<PiInboundConfig>
 ): Promise<boolean> {
+  if (isTestEnvironment() && !overrideConfig?.inboundUrl) {
+    console.log(pc.dim(`[sendToPi] Suppressed real Pi inbound message in test environment`));
+    return true;
+  }
   const config = getPiInboundConfig(overrideConfig);
   if (!config.inboundUrl || !config.inboundToken) {
     return false;
@@ -422,15 +449,7 @@ export async function notifyLlmUnavailableAndExit(
     console.error(pc.dim((err as any).stack));
   }
 
-  const inTest =
-    typeof process !== 'undefined' &&
-    Boolean(
-      process.env.NODE_TEST_CONTEXT ||
-      process.env.VITEST ||
-      process.env.JEST_WORKER_ID ||
-      process.env.NODE_ENV === 'test' ||
-      (process.argv[1] && /(?:^|\/)tests?\/.*\.test\.[cm]?[jt]s$/i.test(process.argv[1]))
-    );
+  const inTest = isTestEnvironment();
 
   // Prevent multiple redundant notifications for the same error object
   if (!(err as any)?.__notifiedTg) {

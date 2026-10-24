@@ -51,7 +51,9 @@ export interface EnvCheckSummary {
   ytDlpPath?: string;
   ffmpegInstalled: boolean;
   profileDir: string;
+  puterAsrConfigured?: boolean;
 }
+
 
 export interface XHotFullResult {
   runId: string;
@@ -69,4 +71,7 @@ export interface XHotFullResult {
   tutorial?: ExplainerVideoSummary;
   stages: Record<string, StageResult>;
   envCheck?: EnvCheckSummary;
+  reportMarkdownPath?: string;
+  reportHtmlPath?: string;
+  reportJsonPath?: string;
 }

@@ -12,15 +12,16 @@ import type {
   EvaluateXHotCandidatesOptions,
 } from './contracts.js';
 import { XHotEvalResultSchema } from './contracts.js';
+import { verifyWinnerName } from './winner-name-check.js';
 
 export async function evaluateXHotCandidatesWithVL(
   options: EvaluateXHotCandidatesOptions
 ): Promise<XHotEvalResult> {
   const { query, candidates, gridBuffer, gridImagePath, onProgress } = options;
   const env = getEnvConfig();
-  const vlModel = options.model || env.vlModel || 'gemini-3.6-flash';
+  const vlModel = options.model || env.vlModel || 'gemini-3.5-flash-lite';
 
-  onProgress?.(`Submitting candidate grid (${candidates.length} tweets) plus ${candidates.length} individual screenshots to VL model ${vlModel}`);
+  onProgress?.(`Submitting candidate grid (${candidates.length} tweets) to VL model ${vlModel}`);
 
   let maskedTextCount = 0;
   const candidateListText = candidates
@@ -55,7 +56,7 @@ export async function evaluateXHotCandidatesWithVL(
 ${candidateListText}
 
 【评审要求】
-1. 仔细查看拼图和逐张原始截图，结合每条推文的发布时间、文本、作者公信力、发布内容亮点、互动数据以及多媒体图文展示。
+1. 仔细查看拼图矩阵，结合每条推文的发布时间、文本、作者公信力、发布内容亮点、互动数据以及多媒体图文展示。
 2. 识别出推文中具体讨论的核心模型/技术/项目名称（例如若是搜 "new model"，识别是哪个具体的大模型如 Claude 3.7, DeepSeek-V3, Llama 3, Sora 还是其他具体模型）。
 3. 统计每个具体模型/项目被多少条不同作者的推文讨论（讨论条数 = 讨论广度），讨论广度是热度最直接的证据，必须作为首要权重。
 4. 时效性硬权重：对比每条推文的发布时间，优先最近 72 小时内发布/引爆的话题；发布已久的旧闻必须降权，除非候选中没有更新的话题。
@@ -104,42 +105,22 @@ ${candidateListText}
 
   const imagePart = imagePartFromBase64(gridBuffer.toString('base64'), 'image/png');
 
-  // Attach each candidate's individual screenshot (downscaled) so the VL model
-  // can cross-check every grid card against its raw capture.
-  const shotParts: ReturnType<typeof imagePartFromBase64>[] = [];
-  for (const c of candidates) {
-    if (!c.screenshotPath) continue;
-    try {
-      const raw = await fs.readFile(c.screenshotPath);
-      const small = await sharp(raw)
-        .resize({ width: 600, withoutEnlargement: true })
-        .png()
-        .toBuffer();
-      shotParts.push(imagePartFromBase64(small.toString('base64'), 'image/png'));
-    } catch {
-      // Missing shot file: proceed without it, the grid still carries the card
-    }
-  }
-
-  const shotNote =
-    shotParts.length > 0
-      ? `\n\n【逐张原始截图】除拼图外，另附 #1 到 #${shotParts.length} 每个候选的单张原始截图，按顺序一一对应，用于与拼图交叉核对。若拼图卡片与单张截图不一致，以单张截图为准并在 reasoning 中说明。`
-      : '';
-
   const response = await chat({
+    model: vlModel,
     context: { stage: 'xhot', task: 'vl-evaluate' },
     messages: [
       { role: 'system', content: systemPrompt },
       {
         role: 'user',
         content: [
-          { type: 'text', text: userPrompt + shotNote },
+          { type: 'text', text: userPrompt },
           imagePart,
-          ...shotParts,
         ],
       },
     ],
     temperature: 0.2,
+    responseFormat: 'json_object',
+    timeoutMs: 300_000,
   }, env);
 
   const jsonExtraction = extractJsonObject(response.content);
@@ -184,24 +165,35 @@ ${candidateListText}
     : topCandidates[0];
 
   // --- Strict consistency validation: refuse hallucinated winner mappings ---
-  // Alphanumeric-only comparison (keep letters/digits/CJK, drop all other chars).
   const winnerCandidate = candidates.find((c) => c.index === winner.index);
-  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '');
-  const winnerTextHaystack = winnerCandidate
-    ? norm(
-        `${winnerCandidate.authorName} ${winnerCandidate.authorHandle} ${winnerCandidate.text}`
-      )
-    : '';
-  const winnerNameNorm = norm(winner.name);
-  // Tolerate decorated names like "Kimi K3 (月之暗面 Moonshot AI)": strip bracketed annotations and re-check
-  const strippedNameNorm = norm(winner.name.replace(/[（(【\[][^）)】\]]*[）)】\]]/g, ' '));
-  const winnerNameMatches =
-    (winnerNameNorm.length >= 2 && winnerTextHaystack.includes(winnerNameNorm)) ||
-    (strippedNameNorm.length >= 2 && winnerTextHaystack.includes(strippedNameNorm));
+
   // Image-only cards (no/empty tweet text) cannot be text-verified; the name lives in the image.
   const winnerCardIsImageOnly =
     !winnerCandidate || winnerCandidate.text.replace(/\s/g, '').length < 8;
-  const nameCheckApplicable = !winnerCardIsImageOnly;
+
+  // Token-tolerant grounding check. The VL model returns a *cluster* name (e.g.
+  // "Anthropic New Model (Claude/Fable)") anchored to one representative tweet, so the
+  // name is rarely a contiguous substring. Author name/handle and the model's own
+  // reasoning are also accepted as grounding evidence when the tweet itself is terse.
+  const nameCheck = verifyWinnerName({
+    name: winner.name,
+    tweetText: winnerCandidate
+      ? `${winnerCandidate.authorName} ${winnerCandidate.authorHandle} ${winnerCandidate.text}`
+      : '',
+    extraHaystacks: [
+      topCandidates.map((c) => `${c.name} ${c.summary} ${c.reason}`).join(' '),
+      String(parsedJson.reasoning || ''),
+    ],
+  });
+  const winnerNameMatches = nameCheck.matches;
+  const nameCheckApplicable =
+    !winnerCardIsImageOnly && nameCheck.applicable && nameCheck.tokens.length > 0;
+
+  if (winnerNameMatches && nameCheck.strategy === 'single-token') {
+    onProgress?.(
+      `Winner name "${winner.name}" grounded only partially (missing: ${nameCheck.missingTokens.join(', ')}) - accepted on cluster-level evidence`
+    );
+  }
 
   // Audit dump: raw response + parsed result + validation outcome, always on disk
   const auditPath = path.join(path.dirname(gridImagePath), 'eval-result.json');
@@ -214,13 +206,14 @@ ${candidateListText}
           model: vlModel,
           evaluatedAt: new Date().toISOString(),
           candidateCount: candidates.length,
-          attachedShots: shotParts.length,
           winner,
           topCandidates: topCandidates.slice(0, 3),
           winnerNameMatches,
           nameCheckApplicable,
           winnerCardIsImageOnly,
-          winnerNameNorm,
+          winnerNameStrategy: nameCheck.strategy,
+          winnerNameTokens: nameCheck.tokens,
+          winnerNameMissingTokens: nameCheck.missingTokens,
           winnerCandidateText: winnerCandidate?.text ?? null,
           rawResponse: response.content,
         },

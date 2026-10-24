@@ -17,7 +17,9 @@ export const XHotHarvestItemSchema = z.object({
     kind: z.enum(['image', 'video']),
     localPath: z.string(),
     url: z.string().optional(),
+    asrTranscript: z.string().optional(),
   })).default([]),
+  asrTranscript: z.string().optional(),
   screenshotPath: z.string().optional(),
 });
 export type XHotHarvestItem = z.infer<typeof XHotHarvestItemSchema>;
@@ -33,7 +35,14 @@ export type XHotHarvestResult = z.infer<typeof XHotHarvestResultSchema>;
 
 export interface HarvestWinnerOptions {
   winnerName: string;
+  previewCount?: number;
   targetCount?: number;
   outDir: string;
+  /**
+   * If true, enables ASR transcription for harvested video assets.
+   * Default is true.
+   */
+  transcribeVideos?: boolean;
   onProgress?: (msg: string) => void;
 }
+

@@ -17,6 +17,10 @@ export const XHotCandidateSchema = z.object({
     views: z.number().default(0),
   }).default({}),
   mediaUrls: z.array(z.string()).default([]),
+  hasVideo: z.boolean().default(false),
+  videoUrl: z.string().optional(),
+  videoPath: z.string().optional(),
+  asrTranscript: z.string().optional(),
   screenshotPath: z.string().optional(),
   thumbnailBuffer: z.instanceof(Buffer).optional(),
 });
@@ -27,8 +31,14 @@ export interface SearchXCandidatesOptions {
   candidateCount?: number;
   maxAgeHours?: number;
   outDir: string;
+  /**
+   * If true, enables ASR transcription for candidate tweets containing video.
+   * Default is true.
+   */
+  transcribeVideos?: boolean;
   onProgress?: (msg: string) => void;
 }
+
 
 export interface XHotGridLayout {
   columns: number;

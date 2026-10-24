@@ -6,7 +6,9 @@ import { verifyEnvConfigWithCurl, printEnvVerification, maskApiKey } from '../..
 import { ensureProfileDir } from '../../../utils/browser.js';
 import { ensureYtDlp } from '../../../libs/media/ytdlp.js';
 import { resolveFfmpegBin } from '../../../libs/media/frames.js';
+import { checkPuterAsrReady } from '../../../libs/asr/index.js';
 import { notifyLlmUnavailableAndExit } from '../../../utils/send_msg.js';
+
 import type { EnvCheckSummary } from '../contracts.js';
 import type { RunLogger } from '../../../utils/logger.js';
 
@@ -76,6 +78,23 @@ export async function checkEnvStage(
     ffmpegInstalled = false;
   }
 
+  // 5. Puter ASR status verification (optional speech-to-text)
+  const puterAsrStatus = await checkPuterAsrReady();
+  if (puterAsrStatus.configured) {
+    logger?.info(`Puter ASR is configured via ${puterAsrStatus.tokenSource} (${puterAsrStatus.tokenPreview})`);
+  } else {
+    logger?.info('Puter ASR is not configured (optional; set PUTER_AUTH_TOKEN in .env to transcribe tweet videos)');
+  }
+
+  // 6. Hugging Face token verification (for Qwen3-TTS ZeroGPU quota)
+  const hfToken = process.env.HF_TOKEN;
+  if (hfToken) {
+    const maskedHf = `${hfToken.slice(0, 4)}...${hfToken.slice(-4)}`;
+    logger?.info(`Hugging Face token is configured for Qwen3-TTS (${maskedHf})`);
+  } else {
+    logger?.info('ℹ HF_TOKEN is not configured in .env (Qwen3-TTS will use unauthenticated ZeroGPU IP quota)');
+  }
+
   return {
     llmConfigured: true,
     llmEndpoint: envConfig.baseUrl,
@@ -88,5 +107,7 @@ export async function checkEnvStage(
     ytDlpPath,
     ffmpegInstalled,
     profileDir,
+    puterAsrConfigured: puterAsrStatus.configured,
   };
+
 }

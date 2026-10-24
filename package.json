@@ -19,7 +19,9 @@
     "module:explainer-video": "tsx src/modules/explainer-video/cli.ts",
     "module:explainer": "tsx src/modules/explainer-video/cli.ts",
     "module:presentation": "tsx src/modules/explainer-video/cli.ts",
+    "lib:asr": "tsx src/libs/asr/cli.ts",
     "pipeline:xhot": "tsx src/cli.ts xhot",
+
     "build": "tsc",
     "test": "tsx --test tests/*.test.ts",
     "test:modules": "tsx --test tests/modules.test.ts",

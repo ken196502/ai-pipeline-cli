@@ -3,6 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import pc from 'picocolors';
 import { executeXHotPipeline } from './execute.js';
+import { printExecutiveSummary } from './report.js';
 import { exitAfterFlush } from '../../utils/shutdown.js';
 import {
   sendMsg,
@@ -30,8 +31,8 @@ export function attachXHotOptions(cmd: Command): Command {
     .option('--candidate-count <number>', 'Number of X candidates to evaluate in grid (default: 12)', (v) => parseInt(v, 10), 12)
     .option('--max-age-hours <number>', 'Max tweet age in hours for candidates (default: 72)', (v) => parseInt(v, 10), 72)
     .option('--profile-dir <path>', 'Custom Chromium profile directory (defaults to ./.chromium-profile)')
-    .option('--headed', 'Run browser in headful mode for visible interaction', false)
-    .option('--headless', 'Force browser headless mode', true)
+    .option('--headed', 'Run browser in headful mode for visible interaction', true)
+    .option('--headless', 'Force browser headless mode', false)
     .option('--skip-video', 'Skip explainer video generation', false)
     .option('--explainer-engine <engine>', 'Explainer video render engine (chromium, firefox)', 'chromium')
     .option('--explainer-fps <n>', 'Frame rate of explainer video', (v) => parseInt(v, 10), 30)
@@ -79,12 +80,25 @@ async function sendSuccessNotification(result: XHotFullResult): Promise<void> {
 
   const caption = msgLines.join('\n').slice(0, 1000);
 
-  let attachment: { filePath: string; fileName?: string; mimetype?: string } | undefined;
+  // If explainer video was generated, deliver the video first
   if (explainer?.videoPath && fs.existsSync(explainer.videoPath)) {
-    attachment = {
+    await sendMsg(`🎬 Explainer Video: ${result.query}`, undefined, {
       filePath: explainer.videoPath,
       fileName: path.basename(explainer.videoPath),
       mimetype: 'video/mp4',
+    }).catch((e) => {
+      console.error(pc.yellow(`[webhook] Warning: Failed to send explainer video: ${e.message}`));
+    });
+  }
+
+  // Deliver the main summary notification with FINAL_REPORT.html (matching VideoGen)
+  let attachment: { filePath: string; fileName?: string; mimetype?: string } | undefined;
+  const htmlReportPath = result.reportHtmlPath || path.join(result.outDir, 'FINAL_REPORT.html');
+  if (fs.existsSync(htmlReportPath)) {
+    attachment = {
+      filePath: htmlReportPath,
+      fileName: 'FINAL_REPORT.html',
+      mimetype: 'text/html',
     };
   } else if (explainer?.gridPath && fs.existsSync(explainer.gridPath)) {
     attachment = {
@@ -159,8 +173,8 @@ export async function handleXHotCommand(queryArg?: string, opts: any = {}): Prom
     candidateCount: opts.candidateCount ?? 12,
     maxCandidateAgeHours: opts.maxAgeHours ?? 72,
     profileDir: opts.profileDir,
-    headed: Boolean(opts.headed),
-    headless: opts.headless !== undefined ? Boolean(opts.headless) : !opts.headed,
+    headed: opts.headed !== undefined ? Boolean(opts.headed) : true,
+    headless: opts.headless !== undefined ? Boolean(opts.headless) : false,
     skipVideo: Boolean(opts.skipVideo),
     explainerEngine: opts.explainerEngine || opts.tutorialEngine || 'chromium',
     explainerFps: opts.explainerFps ?? opts.tutorialFps ?? 30,
@@ -209,17 +223,7 @@ export async function handleXHotCommand(queryArg?: string, opts: any = {}): Prom
         return await executeXHotPipeline(runOptions);
       },
       onRoundSuccess: async (topic, result, round) => {
-        console.log(pc.green(`\n✓ [24h Runner] Round #${round} ("${topic}") completed successfully!`));
-        if (result.winner) {
-          console.log(`🏆 Winner: ${pc.bold(result.winner.name)}`);
-          console.log(`📝 Summary: ${result.winner.summary}`);
-        }
-        const explainer = result.explainer || result.tutorial;
-        if (explainer?.videoPath) {
-          console.log(`🎬 Video: ${explainer.videoPath}`);
-        }
-        console.log(`📁 Artifacts: ${result.outDir}\n`);
-
+        printExecutiveSummary(result);
         await sendSuccessNotification(result);
       },
       onRoundError: async (topic, err: any, round) => {
@@ -250,17 +254,7 @@ export async function handleXHotCommand(queryArg?: string, opts: any = {}): Prom
 
     try {
       const result = await executeXHotPipeline(options);
-      console.log(pc.green(`\n✓ Xhot pipeline completed successfully for "${currentTopic}"!`));
-      if (result.winner) {
-        console.log(`🏆 Winner: ${pc.bold(result.winner.name)}`);
-        console.log(`📝 Summary: ${result.winner.summary}`);
-      }
-      const explainer = result.explainer || result.tutorial;
-      if (explainer?.videoPath) {
-        console.log(`🎬 Video: ${explainer.videoPath}`);
-      }
-      console.log(`📁 Artifacts: ${result.outDir}\n`);
-
+      printExecutiveSummary(result);
       await sendSuccessNotification(result);
     } catch (err: any) {
       await reportPipelineError(err, currentTopic, opts.outDir, true);

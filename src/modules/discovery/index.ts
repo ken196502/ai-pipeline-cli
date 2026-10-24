@@ -35,6 +35,7 @@ export async function testDiscoveryModule(): Promise<{
         text: 'Claude 3.7 announced with hybrid reasoning.',
         metrics: { replies: 10, reposts: 50, likes: 200, views: 5000 },
         mediaUrls: [],
+        hasVideo: false,
       },
       {
         index: 2,
@@ -44,7 +45,9 @@ export async function testDiscoveryModule(): Promise<{
         text: 'DeepSeek-V3 open source weights benchmark report.',
         metrics: { replies: 20, reposts: 80, likes: 400, views: 9000 },
         mediaUrls: [],
+        hasVideo: false,
       },
+
     ];
 
     const result = await buildXHotGrid({

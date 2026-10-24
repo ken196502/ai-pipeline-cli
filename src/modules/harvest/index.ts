@@ -1,6 +1,7 @@
 import { resolveYtDlpBinary } from '../../libs/media/ytdlp.js';
 
 export * from './contracts.js';
+export * from './eval-richness.js';
 export * from './harvest.js';
 
 /**

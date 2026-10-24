@@ -89,7 +89,7 @@ export function getEnvConfig(): EnvConfig {
     baseUrl: process.env.BASE_URL || 'https://ai.reluv.xyz/v1',
     apiKey: process.env.API_KEY || '',
     llmModel: process.env.LLM_MODEL || 'gemini-3.6-flash',
-    vlModel: process.env.VL_MODEL || 'gemini-3.6-flash',
+    vlModel: process.env.VL_MODEL || 'gemini-3.5-flash-lite',
     vlFallbackModel: process.env.VL_FALLBACK_MODEL || undefined,
     imageModel: process.env.IMAGE_MODEL || 'sensenova-u1-fast',
     apiStyle: (process.env.LLM_API_STYLE as 'chat' | 'responses' | undefined) || 'chat',

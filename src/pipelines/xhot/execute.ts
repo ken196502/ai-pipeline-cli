@@ -11,11 +11,24 @@ import {
   type EnvCheckSummary,
 } from './contracts.js';
 import { ensureXLogin } from '../../modules/auth/auth.js';
+import { resetProfileFromSystemAndLogin } from '../../modules/auth/relogin.js';
 import { searchXCandidates, buildXHotGrid, type XHotCandidate } from '../../modules/discovery/index.js';
 import { evaluateXHotCandidatesWithVL, type XHotEvalResult } from '../../modules/evaluation/index.js';
 import { harvestWinnerTopicMaterials, type XHotHarvestResult } from '../../modules/harvest/index.js';
 import { createExplainerVideo } from '../../modules/explainer-video/index.js';
-import { generateXHotMarkdown, generateXHotJson, printXHotSummary } from './report.js';
+import {
+  generateFinalReportMarkdown,
+  generateFinalReportJson,
+  saveFinalReports,
+  printExecutiveSummary,
+  generateXHotMarkdown,
+  generateXHotJson,
+  printXHotSummary,
+} from './report.js';
+import {
+  notifyError,
+  formatDetailedErrorMessage,
+} from '../../utils/send_msg.js';
 import type { Pipeline } from '../core/contracts.js';
 
 export async function executeXHotPipeline(
@@ -78,9 +91,10 @@ export async function executeXHotPipeline(
       stages,
       envCheck,
     };
-    const md = generateXHotMarkdown(dryResult);
-    const json = generateXHotJson(dryResult);
-    await ctx.saveReports(md, json);
+    const reportPaths = await saveFinalReports(dryResult, outDir);
+    dryResult.reportMarkdownPath = reportPaths.markdownPath;
+    dryResult.reportHtmlPath = reportPaths.htmlPath;
+    dryResult.reportJsonPath = reportPaths.jsonPath;
     recordStage('report', 'completed', 10, 'Dry-run report generated');
     return dryResult;
   }
@@ -103,15 +117,52 @@ export async function executeXHotPipeline(
       keepAlive: true,
     });
 
-    await ensureXLogin(browserSession.page, {
+    // The existing profile is always tried FIRST (credentials login on the
+    // profile we already have). Only a real risk-control blocker — phone/SMS
+    // verification, Arkose/CAPTCHA, /signup_phone, /account/access — triggers the
+    // destructive reset: delete profile → copy system profile → headed CDP →
+    // credentials. Absence of a session alone never deletes anything.
+    const loginResult = await ensureXLogin(browserSession.page, {
+      profileDir,
       onProgress: (m) => notify('x-login', m),
+      onChallenge: async (diagnosis) => {
+        notify(
+          'x-login',
+          `⚠️ X 风控拦截（${diagnosis.reason}）→ 删除 profile / 复制系统 profile / 有头 CDP / 账号密码登录`
+        );
+        const session = await resetProfileFromSystemAndLogin({
+          profileDir,
+          browser: browserSession.browser,
+          onProgress: (m) => notify('x-login', m),
+        });
+        return {
+          loggedIn: true,
+          page: session.page,
+          session,
+          recovered: true,
+          reason: diagnosis.reason,
+        };
+      },
     });
-    recordStage('x-login', 'completed', Date.now() - stage2Start, 'Logged into X with persistent session');
+    // The recovery path replaces the browser (headed, fresh profile): every later
+    // stage must drive the page that actually owns the authenticated session.
+    if (loginResult.session) {
+      browserSession = loginResult.session;
+    }
+    const xPage = loginResult.page;
+    recordStage(
+      'x-login',
+      'completed',
+      Date.now() - stage2Start,
+      loginResult.recovered
+        ? `X login recovered after risk-control blocker: profile reset from system profile (${loginResult.reason || 'verification blocker'})`
+        : 'Logged into X with persistent session'
+    );
 
     // Stage 3: Topic Search & Grid (Discovery Module)
     notify('x-search-grid', `Stage 3/7: Searching X for "${options.query}" and assembling screenshot grid`);
     const stage3Start = Date.now();
-    candidates = await searchXCandidates(browserSession.page, {
+    candidates = await searchXCandidates(xPage, {
       query: options.query,
       candidateCount: options.candidateCount,
       maxAgeHours: options.maxCandidateAgeHours,
@@ -156,9 +207,10 @@ export async function executeXHotPipeline(
     const winnerName = evalResult.winner.name;
     notify('x-harvest', `Stage 5/7: Searching X for winner "${winnerName}" to harvest tweets and media`);
     const stage5Start = Date.now();
-    harvestResult = await harvestWinnerTopicMaterials(browserSession.page, {
+    harvestResult = await harvestWinnerTopicMaterials(xPage, {
       winnerName,
-      targetCount: 6,
+      previewCount: 20,
+      targetCount: 10,
       outDir,
       onProgress: (m) => notify('x-harvest', m),
     });
@@ -203,6 +255,12 @@ export async function executeXHotPipeline(
     } catch (err: any) {
       recordStage('x-video', 'failed', Date.now() - stage6Start, 'Explainer video rendering failed', err.message);
       logger.error('Failed to render explainer video:', err);
+      // Trigger instant Telegram alert for video generation failure
+      const detailedMsg = formatDetailedErrorMessage(err, `❌ Stage 6/7 failed: Explainer Video [${options.query}]`, {
+        outDir,
+        logPath: path.join(outDir, 'pipeline.log'),
+      });
+      await notifyError(detailedMsg).catch(() => {});
     }
   } else {
     recordStage('x-video', 'skipped', 0, 'Explainer video stage skipped (--skip-video)');
@@ -232,9 +290,10 @@ export async function executeXHotPipeline(
     envCheck,
   };
 
-  const mdReport = generateXHotMarkdown(fullResult);
-  const jsonReport = generateXHotJson(fullResult);
-  await ctx.saveReports(mdReport, jsonReport);
+  const reportPaths = await saveFinalReports(fullResult, outDir);
+  fullResult.reportMarkdownPath = reportPaths.markdownPath;
+  fullResult.reportHtmlPath = reportPaths.htmlPath;
+  fullResult.reportJsonPath = reportPaths.jsonPath;
   recordStage('report', 'completed', Date.now() - stage7Start, 'Reports saved');
 
   return fullResult;

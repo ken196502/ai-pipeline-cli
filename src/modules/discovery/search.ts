@@ -3,15 +3,24 @@ import path from 'node:path';
 import sharp from 'sharp';
 import type { Page, ElementHandle } from 'playwright-core';
 import pc from 'picocolors';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { ensureStandardBinaryPaths, resolveYtDlpBinary } from '../../libs/media/ytdlp.js';
+import { transcribeTweetVideo, checkPuterAsrReady } from '../../libs/asr/index.js';
 import type { XHotCandidate } from './contracts.js';
+
+const execFileAsync = promisify(execFile);
+
 
 export interface SearchXOptions {
   query: string;
   candidateCount?: number;
   maxAgeHours?: number;
   outDir: string;
+  transcribeVideos?: boolean;
   onProgress?: (msg: string) => void;
 }
+
 
 const TWEET_SELECTOR = 'article[data-testid="tweet"]';
 const MIN_SHOT_BYTES = 8_000;
@@ -276,6 +285,13 @@ async function captureCandidate(
     )
     .catch(() => [] as string[]);
 
+  // Detect video elements in candidate card
+  const videoCount = await locator
+    .locator('[data-testid="videoPlayer"], [data-testid="videoComponent"]')
+    .count()
+    .catch(() => 0);
+  const hasVideo = videoCount > 0;
+
   return {
     status: 'ok',
     candidate: {
@@ -289,6 +305,7 @@ async function captureCandidate(
       ageHours,
       metrics: { replies, reposts, likes, views },
       mediaUrls,
+      hasVideo,
       screenshotPath: shotPath,
       thumbnailBuffer: thumbBuffer,
     },
@@ -381,16 +398,67 @@ export async function searchXCandidates(
           }
 
           const candidate = result.candidate;
+
+          // If tweet has video and transcribeVideos is enabled, process ASR
+          if (candidate.hasVideo && candidate.url && options.transcribeVideos !== false) {
+            const asrReady = await checkPuterAsrReady();
+            if (asrReady.configured) {
+              report(`Candidate #${candidate.index} contains video. Downloading video for Puter ASR...`);
+              const videoDir = path.join(outDir, 'candidate-videos');
+              await fs.mkdir(videoDir, { recursive: true });
+              const localVideoPath = path.join(videoDir, `candidate-${candidate.id}.mp4`);
+              try {
+                ensureStandardBinaryPaths();
+                const ytdlpBin = await resolveYtDlpBinary();
+                await execFileAsync(
+                  ytdlpBin,
+                  [
+                    candidate.url,
+                    '-f',
+                    'bv*+ba/b',
+                    '-S',
+                    'res:720,ext:mp4:m4a',
+                    '--recode-video',
+                    'mp4',
+                    '-o',
+                    localVideoPath,
+                    '--no-playlist',
+                    '--socket-timeout',
+                    '20',
+                  ],
+                  { timeout: 45_000 }
+                );
+
+                candidate.videoUrl = candidate.url;
+                candidate.videoPath = localVideoPath;
+
+                report(`Running Puter ASR on candidate #${candidate.index} video...`);
+                const asrRes = await transcribeTweetVideo(localVideoPath, {}, (msg) => {
+                  report(`[asr] ${msg}`);
+                });
+                if (asrRes.text && asrRes.text.trim()) {
+                  candidate.asrTranscript = asrRes.text.trim();
+                  report(`✓ Candidate #${candidate.index} ASR (${candidate.asrTranscript.length} chars): "${candidate.asrTranscript.slice(0, 70).replace(/\n/g, ' ')}..."`);
+                }
+              } catch (vErr: any) {
+                report(`⚠ Video download/ASR error on candidate #${candidate.index}: ${vErr.message}`);
+              }
+            } else {
+              report(`ℹ Candidate #${candidate.index} has video (Puter ASR not configured, skipping ASR)`);
+            }
+          }
+
           candidates.push(candidate);
           report(
             `Collected candidate #${candidate.index}: [${candidate.authorHandle}] ${candidate.text
               .slice(0, 50)
-              .replace(/\n/g, ' ')}...`
+              .replace(/\n/g, ' ')}...${candidate.hasVideo ? ' [VIDEO]' : ''}`
           );
         } catch {
           // Continue sweep on individual tweet parsing error
         }
       }
+
 
       if (candidates.length < candidateCount) {
         report(

@@ -11,6 +11,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { loadEnvFile } from '../../utils/env.js';
 import type {
   ExplainerWord,
   ExplainerClip,
@@ -25,12 +26,312 @@ const execFileAsync = promisify(execFile);
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
+/** Default Hugging Face Space Qwen3-TTS URL. */
+export const DEFAULT_QWEN3_TTS_URL = 'https://qwen-qwen3-tts.hf.space';
+
 /** Default local clone TTS URL. */
 export const DEFAULT_LOCAL_TTS_URL = 'http://192.168.64.1:6111';
 
+/** Resolves the Qwen3 TTS service URL from parameter or environment. */
+export function resolveQwen3TtsUrl(customUrl?: string): string {
+  const url = customUrl || process.env.QWEN3_TTS_URL || DEFAULT_QWEN3_TTS_URL;
+  return url.replace(/https?:\/\/huggingface\.co\/spaces\//, 'https://').replace(/\/+$/, '');
+}
+
 /** Resolves the local TTS service URL from parameter or environment. */
 export function resolveLocalTtsUrl(customUrl?: string): string {
+  loadEnvFile();
   return (customUrl || process.env.LOCAL_TTS_URL || DEFAULT_LOCAL_TTS_URL).replace(/\/+$/, '');
+}
+
+/** Parses cooldown seconds from ZeroGPU quota exceeded message, or null if not a ZeroGPU quota error. */
+export function parseZeroGpuWaitSec(errorMsg: string): number | null {
+  if (!errorMsg.toLowerCase().includes('zerogpu quota')) {
+    return null;
+  }
+  const match = errorMsg.match(/Try again in (?:(\d+):)?(\d+):(\d+)/i);
+  if (match) {
+    const hours = match[1] ? parseInt(match[1], 10) : 0;
+    const minutes = parseInt(match[2], 10);
+    const seconds = parseInt(match[3], 10);
+    const totalSec = hours * 3600 + minutes * 60 + seconds;
+    return totalSec > 0 ? totalSec : 15;
+  }
+  return 20;
+}
+
+/**
+ * Executes a single attempt to synthesize speech using Hugging Face Space Qwen3-TTS (gradio 5 API).
+ */
+async function executeSingleQwen3TtsAttempt(
+  text: string,
+  options: {
+    url?: string;
+    speaker?: string;
+    language?: string;
+    instruct?: string;
+    modelSize?: string;
+    timeoutMs?: number;
+    token?: string;
+  } = {}
+): Promise<{ audioBuffer: Buffer; durationSec: number; words: ExplainerWord[] }> {
+  loadEnvFile();
+  const baseUrl = resolveQwen3TtsUrl(options.url);
+  const timeoutMs = options.timeoutMs ?? 180_000;
+  const speaker = options.speaker || 'Ryan';
+  const language = options.language || 'Auto';
+  const instruct = options.instruct !== undefined ? options.instruct : 'Speak in a calm, steady, professional documentary narrator tone.';
+  const modelSize = options.modelSize || '1.7B';
+  const hfToken = options.token !== undefined ? (options.token ? options.token : undefined) : process.env.HF_TOKEN;
+
+  const sessionHash = Math.random().toString(36).slice(2, 12);
+  const joinEndpoint = `${baseUrl}/gradio_api/queue/join`;
+
+  const requestHeaders: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (hfToken) {
+    requestHeaders['Authorization'] = `Bearer ${hfToken}`;
+  }
+
+  let joinResponse: Response;
+  try {
+    joinResponse = await fetch(joinEndpoint, {
+      method: 'POST',
+      headers: requestHeaders,
+      body: JSON.stringify({
+        data: [
+          text,
+          language,
+          speaker,
+          instruct, // Style Instruction (Optional)
+          modelSize,
+        ],
+        fn_index: 2,
+        trigger_id: 49,
+        session_hash: sessionHash,
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err: any) {
+    throw new Error(
+      `Failed to initiate Qwen3-TTS queue request at ${joinEndpoint}: ${err?.message || String(err)}`
+    );
+  }
+
+  if (!joinResponse.ok) {
+    const errText = await joinResponse.text().catch(() => '');
+    throw new Error(
+      `Qwen3-TTS queue join failed with HTTP ${joinResponse.status} (${joinResponse.statusText}): ${errText}`
+    );
+  }
+
+  const joinResult = (await joinResponse.json()) as { event_id?: string };
+  const eventId = joinResult.event_id;
+  if (!eventId) {
+    throw new Error(`Qwen3-TTS did not return an event_id: ${JSON.stringify(joinResult)}`);
+  }
+
+  // Stream SSE results from queue/data until completion
+  const streamEndpoint = `${baseUrl}/gradio_api/queue/data?session_hash=${encodeURIComponent(sessionHash)}`;
+  let streamResponse: Response;
+  try {
+    streamResponse = await fetch(streamEndpoint, {
+      method: 'GET',
+      headers: {
+        Accept: 'text/event-stream',
+        ...(hfToken ? { Authorization: `Bearer ${hfToken}` } : {}),
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err: any) {
+    throw new Error(
+      `Failed to read Qwen3-TTS queue stream at ${streamEndpoint}: ${err?.message || String(err)}`
+    );
+  }
+
+  if (!streamResponse.ok) {
+    const errText = await streamResponse.text().catch(() => '');
+    throw new Error(
+      `Qwen3-TTS stream failed with HTTP ${streamResponse.status} (${streamResponse.statusText}): ${errText}`
+    );
+  }
+
+  const streamBody = streamResponse.body;
+  if (!streamBody) {
+    throw new Error('Qwen3-TTS queue stream response body is null');
+  }
+
+  const reader = streamBody.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let audioDownloadUrl: string | null = null;
+  const recentMessages: any[] = [];
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (line.startsWith('data:')) {
+          const rawData = line.slice(5).trim();
+          try {
+            const parsed = JSON.parse(rawData);
+            if (recentMessages.length > 5) recentMessages.shift();
+            recentMessages.push(parsed);
+
+            if (parsed.msg === 'unexpected_error') {
+              const errDetail = parsed.message || parsed.output?.error || JSON.stringify(parsed);
+              throw new Error(`Qwen3-TTS unexpected error: ${errDetail}`);
+            }
+
+            if (parsed.msg === 'process_completed') {
+              if (parsed.success === false) {
+                const errDetail =
+                  parsed.output?.error || parsed.title || JSON.stringify(parsed.output || {});
+                throw new Error(`Qwen3-TTS synthesis failed: ${errDetail}`);
+              }
+              const outputData = parsed.output?.data;
+              if (Array.isArray(outputData) && outputData[0]?.url) {
+                audioDownloadUrl = outputData[0].url;
+              } else if (Array.isArray(outputData) && outputData[0]?.path) {
+                audioDownloadUrl = `${baseUrl}/gradio_api/file=${outputData[0].path}`;
+              }
+              break;
+            } else if (parsed.msg === 'close_stream' && !audioDownloadUrl) {
+              break;
+            }
+          } catch (e: any) {
+            if (e.message && e.message.includes('Qwen3-TTS synthesis failed:')) {
+              throw e;
+            }
+          }
+        }
+      }
+
+      if (audioDownloadUrl) break;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (!audioDownloadUrl) {
+    const summary = recentMessages.map((m) => m?.msg || JSON.stringify(m)).join(', ');
+    throw new Error(
+      `Qwen3-TTS stream closed without returning generated audio. Last messages: [${summary}]. ZeroGPU quota may be exhausted or Hugging Face token is required.`
+    );
+  }
+
+  // Download the generated audio file
+  let audioFetchResponse: Response;
+  try {
+    audioFetchResponse = await fetch(audioDownloadUrl, {
+      headers: hfToken ? { Authorization: `Bearer ${hfToken}` } : {},
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err: any) {
+    throw new Error(
+      `Failed to download synthesized audio from ${audioDownloadUrl}: ${err?.message || String(err)}`
+    );
+  }
+
+  if (!audioFetchResponse.ok) {
+    throw new Error(
+      `Failed to download audio from ${audioDownloadUrl}: HTTP ${audioFetchResponse.status}`
+    );
+  }
+
+  const arrayBuf = await audioFetchResponse.arrayBuffer();
+  const audioBuffer = Buffer.from(arrayBuf);
+
+  // Measure audio duration precisely using ffprobe on a temp file
+  const tmpWav = path.join(os.tmpdir(), `qwen3_tts_${Date.now()}_${Math.random().toString(36).slice(2)}.wav`);
+  await fs.writeFile(tmpWav, audioBuffer);
+  let durationSec = 0;
+  try {
+    durationSec = await probeDurationSec(tmpWav);
+  } finally {
+    await fs.rm(tmpWav, { force: true }).catch(() => undefined);
+  }
+
+  // Generate linear word/character timings across the duration
+  const words: ExplainerWord[] = [];
+  const textChars = Array.from(text);
+  if (textChars.length > 0 && durationSec > 0) {
+    const charStep = durationSec / textChars.length;
+    textChars.forEach((c, idx) => {
+      words.push({
+        word: c,
+        t0: Math.round(idx * charStep * 1000) / 1000,
+        t1: Math.round((idx + 1) * charStep * 1000) / 1000,
+      });
+    });
+  }
+
+  return { audioBuffer, durationSec, words };
+}
+
+/**
+ * Synthesizes speech using Hugging Face Space Qwen3-TTS (gradio 5 API) with ZeroGPU quota retry resilience.
+ * Fails loudly if the service returns an unrecoverable error or retries are exhausted (no fallback).
+ */
+export async function synthesizeQwen3Tts(
+  text: string,
+  options: {
+    url?: string;
+    speaker?: string;
+    language?: string;
+    instruct?: string;
+    modelSize?: string;
+    timeoutMs?: number;
+    token?: string;
+    maxRetries?: number;
+  } = {}
+): Promise<{ audioBuffer: Buffer; durationSec: number; words: ExplainerWord[] }> {
+  loadEnvFile();
+  const maxRetries = options.maxRetries ?? 3;
+  let lastError: any = null;
+  let currentToken = options.token || process.env.HF_TOKEN;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+    try {
+      return await executeSingleQwen3TtsAttempt(text, {
+        ...options,
+        token: currentToken,
+      });
+    } catch (err: any) {
+      lastError = err;
+      const errMsg = err?.message || '';
+
+      // If a free Hugging Face token is rejected because free account quota is 0s,
+      // drop the token to let the request use the proxy IP quota.
+      if (currentToken && errMsg.includes('free ZeroGPU quota')) {
+        console.warn(
+          `[tts] HF_TOKEN is a free tier account with 0s quota. Switching to proxy IP quota for Qwen3-TTS...`
+        );
+        currentToken = '';
+        continue;
+      }
+
+      const waitSec = parseZeroGpuWaitSec(errMsg);
+      if (waitSec !== null && attempt < maxRetries) {
+        console.warn(
+          `[tts] ZeroGPU quota temporarily exceeded (${errMsg.slice(0, 80)}...). Cooling down for ${waitSec}s before retry ${attempt + 1}/${maxRetries}...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, waitSec * 1000));
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastError;
 }
 
 export interface LocalTtsTimestamp {
@@ -97,7 +398,7 @@ export async function synthesizeLocalTts(
 }
 
 /** Path of the edge-tts python helper (lives in <project>/tools). */
-export const EDGE_TTS_SYNTH_SCRIPT = path.resolve(moduleDir, '..', '..', '..', 'tools', 'edge_tts_synth.py');
+export const EDGE_TTS_SYNTH_SCRIPT = path.resolve(moduleDir, '..', '..', 'tools', 'edge_tts_synth.py');
 
 /** Default edge-tts voices per narration language (overridable via --tts-voice). */
 export const DEFAULT_VOICE_BY_LANG: Readonly<Record<string, string>> = {
@@ -141,6 +442,7 @@ export interface SynthesizeNarrationOptions {
   voice?: string;
   rate?: string;
   ttsUrl?: string;
+  instruct?: string;
   pythonBin?: string;
   cwd?: string;
 }
@@ -181,7 +483,7 @@ export async function probeDurationSec(filePath: string): Promise<number> {
   return duration;
 }
 
-/** Synthesizes a single narration line (MP3 + word timings) via local clone TTS. */
+/** Synthesizes a single narration line (MP3 + word timings) via Qwen3-TTS HF Space (or local TTS if explicitly designated). */
 export async function synthesizeNarrationSegment(
   request: NarrationSegmentRequest,
   options: SynthesizeNarrationOptions = {}
@@ -189,9 +491,21 @@ export async function synthesizeNarrationSegment(
   await fs.mkdir(path.dirname(request.outAudioPath), { recursive: true });
   const wordsPath = `${request.outAudioPath}.words.json`;
 
-  const { audioBuffer, durationSec, words } = await synthesizeLocalTts(request.text, {
-    url: options.ttsUrl,
-  });
+  let synthResult: { audioBuffer: Buffer; durationSec: number; words: ExplainerWord[] };
+
+  if (options.ttsUrl && options.ttsUrl.includes('192.168.')) {
+    synthResult = await synthesizeLocalTts(request.text, {
+      url: options.ttsUrl,
+    });
+  } else {
+    synthResult = await synthesizeQwen3Tts(request.text, {
+      url: options.ttsUrl,
+      speaker: options.voice,
+      instruct: options.instruct,
+    });
+  }
+
+  const { audioBuffer, durationSec, words } = synthResult;
 
   const isMp3 = request.outAudioPath.toLowerCase().endsWith('.mp3');
   if (isMp3) {
@@ -418,7 +732,7 @@ export async function buildNarrationTrack(
   }
 
   const sampleRate = options.sampleRate ?? 44100;
-  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'explainer-narration-'));
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tutorial-narration-'));
   const wavPath = `${outBasePath}.wav`;
   const m4aPath = `${outBasePath}.m4a`;
   const totalDurationSec = segments.reduce((acc, seg) => acc + seg.durationSec, 0);
@@ -545,6 +859,7 @@ export async function buildOpusVoiceTrack(params: {
   assets?: ExplainerAsset[];
   voice?: string;
   rate?: string;
+  instruct?: string;
   sampleRate?: number;
   ttsUrl?: string;
   onProgress?: (message: string) => void;
@@ -655,7 +970,7 @@ export async function buildOpusVoiceTrack(params: {
                 text: lineText,
                 outAudioPath: segAudioPath,
               },
-              { voice, rate, ttsUrl: params.ttsUrl }
+              { voice, rate, instruct: params.instruct, ttsUrl: params.ttsUrl }
             );
 
             // Convert line segment to PCM WAV for seamless concatenation

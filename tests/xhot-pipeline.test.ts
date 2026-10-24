@@ -7,6 +7,11 @@ import {
   XHOT_STAGES,
   XHotPipelineOptionsSchema,
   executeXHotPipeline,
+  generateFinalReportMarkdown,
+  generateFinalReportJson,
+  saveFinalReports,
+  printExecutiveSummary,
+  type XHotFullResult,
 } from '../src/pipelines/index.js';
 import {
   buildXHotGrid,
@@ -207,8 +212,133 @@ test('executeXHotPipeline in dry-run mode completes all stages and produces repo
 
     const reportMdExists = await fs.stat(path.join(tempDir, 'report.md')).then(() => true).catch(() => false);
     const resultJsonExists = await fs.stat(path.join(tempDir, 'result.json')).then(() => true).catch(() => false);
+    const finalReportMdExists = await fs.stat(path.join(tempDir, 'FINAL_REPORT.md')).then(() => true).catch(() => false);
+    const finalReportHtmlExists = await fs.stat(path.join(tempDir, 'FINAL_REPORT.html')).then(() => true).catch(() => false);
+    const finalReportJsonExists = await fs.stat(path.join(tempDir, 'final-report.json')).then(() => true).catch(() => false);
+
     assert.ok(reportMdExists, 'report.md must be generated');
     assert.ok(resultJsonExists, 'result.json must be generated');
+    assert.ok(finalReportMdExists, 'FINAL_REPORT.md must be generated');
+    assert.ok(finalReportHtmlExists, 'FINAL_REPORT.html must be generated');
+    assert.ok(finalReportJsonExists, 'final-report.json must be generated');
+
+    assert.equal(result.reportMarkdownPath, path.join(tempDir, 'FINAL_REPORT.md'));
+    assert.equal(result.reportHtmlPath, path.join(tempDir, 'FINAL_REPORT.html'));
+    assert.equal(result.reportJsonPath, path.join(tempDir, 'final-report.json'));
+
+    const htmlContent = await fs.readFile(path.join(tempDir, 'FINAL_REPORT.html'), 'utf-8');
+    assert.ok(/<!doctype html>/i.test(htmlContent), 'HTML report must have doctype');
+    assert.ok(htmlContent.includes('Xhot Pipeline Report'), 'HTML report must include title');
+    assert.ok(htmlContent.includes('Executive Summary'), 'HTML report must include Executive Summary');
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test('generateFinalReportMarkdown and saveFinalReports generate full VideoGen-style reports', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'xhot-full-report-'));
+  try {
+    const mockResult: XHotFullResult = {
+      runId: 'xhot-test-run-123',
+      pipelineId: 'xhot',
+      query: 'AI agents 2026',
+      outDir: tempDir,
+      startedAt: '2026-10-22T10:00:00.000Z',
+      completedAt: '2026-10-22T10:08:30.000Z',
+      totalDurationMs: 510000,
+      winner: {
+        rank: 1,
+        index: 1,
+        id: 'c-1',
+        name: 'AutoAgent Pro',
+        summary: 'Autonomous coding agent released',
+        reason: 'Most significant technical discussion',
+      },
+      topCandidates: [
+        { rank: 1, index: 1, id: 'c-1', name: 'AutoAgent Pro', summary: 'Autonomous coding agent released', reason: 'Most significant technical discussion' },
+        { rank: 2, index: 2, id: 'c-2', name: 'FastReasoner', summary: '10x faster reasoning', reason: 'Strong community engagement' },
+        { rank: 3, index: 3, id: 'c-3', name: 'OmniVision 3', summary: 'Open source multimodal model', reason: 'High reposts and benchmark scores' },
+      ],
+      gridImagePath: path.join(tempDir, 'xhot-grid.png'),
+      harvestResult: {
+        materialsDir: path.join(tempDir, 'materials'),
+        harvestedMediaCount: 3,
+        items: [
+          {
+            tweetId: 't-1',
+            text: 'AutoAgent Pro released with full sandbox capability',
+            authorName: 'Tech Insiders',
+            authorHandle: 'tech_insiders',
+            mediaFiles: [
+              { kind: 'image', localPath: 'p1.jpg' },
+              { kind: 'video', localPath: 'v1.mp4' },
+            ],
+            asrTranscript: 'This changes agentic workflows completely.',
+          },
+        ],
+        topicName: 'AutoAgent Pro',
+      },
+      explainer: {
+        videoPath: path.join(tempDir, 'explainer', 'explainer-video.mp4'),
+        playerPath: path.join(tempDir, 'explainer', 'index.html'),
+        storyboardPath: path.join(tempDir, 'explainer', 'storyboard.json'),
+        narrationPath: path.join(tempDir, 'explainer', 'narration.mp3'),
+        totalDurationSec: 45.2,
+        fps: 30,
+        resolution: { width: 1080, height: 1920 },
+        sceneCount: 4,
+        voice: 'zh-CN-YunxiNeural',
+        rate: '+5%',
+        framesRendered: 1356,
+      },
+      stages: {
+        'check-env': { stage: 'check-env', status: 'completed', durationMs: 1200, summary: 'Environment verified' },
+        'x-login': { stage: 'x-login', status: 'completed', durationMs: 4500, summary: 'Persistent X login active' },
+        'x-search': { stage: 'x-search', status: 'completed', durationMs: 15000, summary: '12 candidates captured' },
+        'x-eval': { stage: 'x-eval', status: 'completed', durationMs: 8000, summary: 'Top 3 ranked' },
+        'x-harvest': { stage: 'x-harvest', status: 'completed', durationMs: 12000, summary: '1 tweet, 3 media files harvested' },
+        'x-video': { stage: 'x-video', status: 'completed', durationMs: 30000, summary: 'Explainer video rendered' },
+        'report': { stage: 'report', status: 'completed', durationMs: 500, summary: 'Reports saved' },
+      },
+      envCheck: {
+        llmConfigured: true,
+        llmEndpoint: 'https://ai.reluv.xyz/v1',
+        llmModel: 'glm-5.3-flash',
+        vlModel: 'nemotron-3.5-super-vl',
+        chromiumInstalled: true,
+        chromiumPath: '/usr/bin/chromium',
+        chromiumVersion: '130.0.0.0',
+        ytDlpInstalled: true,
+        ytDlpPath: '/usr/local/bin/yt-dlp',
+        ffmpegInstalled: true,
+        profileDir: '/tmp/test-profile',
+        puterAsrConfigured: true,
+      },
+    };
+
+    const md = generateFinalReportMarkdown(mockResult);
+    assert.ok(md.includes('# 🔥 Xhot Trending Video Generation Pipeline Report'));
+    assert.ok(md.includes('AutoAgent Pro'));
+    assert.ok(md.includes('This changes agentic workflows completely.'));
+    assert.ok(md.includes('Puter ASR Speech Transcription'));
+    assert.ok(md.includes('Pipeline Execution Stages'));
+    assert.ok(md.includes('Artifact Manifest'));
+
+    const json = generateFinalReportJson(mockResult);
+    assert.ok(json.includes('"xhot-test-run-123"'));
+
+    const saved = await saveFinalReports(mockResult, tempDir);
+    assert.equal(saved.markdownPath, path.join(tempDir, 'FINAL_REPORT.md'));
+    assert.equal(saved.htmlPath, path.join(tempDir, 'FINAL_REPORT.html'));
+    assert.equal(saved.jsonPath, path.join(tempDir, 'final-report.json'));
+
+    const html = await fs.readFile(saved.htmlPath, 'utf-8');
+    assert.ok(/<!doctype html>/i.test(html), 'HTML report must have doctype');
+    assert.ok(html.includes('AutoAgent Pro'));
+    assert.ok(html.includes('Executive Summary'));
+
+    // Test printExecutiveSummary doesn't throw
+    printExecutiveSummary(mockResult);
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }

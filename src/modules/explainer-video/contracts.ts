@@ -24,6 +24,7 @@ export interface CreateExplainerVideoOptions {
   subtitles?: boolean;
   ttsVoice?: string;
   ttsRate?: string;
+  ttsInstruct?: string;
   browserPath?: string;
   profileDir?: string;
   onProgress?: (stage: string, message: string) => void;
@@ -68,6 +69,7 @@ export interface ExplainerProduceOptions {
   subtitles?: boolean;
   ttsVoice?: string;
   ttsRate?: string;
+  ttsInstruct?: string;
   browserPath?: string;
   profileDir?: string;
   crf?: number;

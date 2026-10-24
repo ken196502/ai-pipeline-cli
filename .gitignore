@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .chromium-profile/
+.chromium-profile.broken-*/
 .DS_Store
 *.log
 *.jsonl
@@ -38,3 +39,11 @@ tutorial-preview/
 
 # Runner state
 runner-24h-state.json
+x_cookies.json
+x_cookies.json.broken-*
+
+# Puter ASR credentials and temp files
+puter_token.json
+.puter/
+*.asr.json
+

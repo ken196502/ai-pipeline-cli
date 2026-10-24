@@ -663,6 +663,15 @@ export const PLAYER_JS = `
     });
   }
 
+  // Pre-collect candidate flash images (assets matching candidate-* or cand-*)
+  var flashImages = [];
+  assetList.forEach(function (a) {
+    if (a.kind === 'image' && (/^candidate-\\d+/i.test(a.id) || /^cand-\\d+/i.test(a.id))) {
+      var entry = mediaElements.get(a.id);
+      if (entry && entry.el) flashImages.push({ id: a.id, el: entry.el, label: a.label || '' });
+    }
+  });
+
   // Time & Duration calculations
   var playDur = clips.map(function (c) { return c.shots.length * shotDur; });
   var total = playDur.reduce(function (a, b) { return a + b; }, 0);
@@ -1100,6 +1109,90 @@ export const PLAYER_JS = `
     var id = typeof visualRef === 'string' ? visualRef : visualRef.assetId || visualRef.name || '';
     var label = typeof visualRef === 'object' ? visualRef.label : '';
 
+    // 0. Flash Component (Rapid cinematic candidate shot montage)
+    if (id === 'flash' || id.indexOf('flash:') === 0 || id === 'xhot-candidate-grid') {
+      var pool = flashImages.length > 0 ? flashImages : [];
+      if (pool.length === 0) {
+        // Fallback to all images if candidate shots are not present
+        assetList.forEach(function (a) {
+          if (a.kind === 'image' && a.id !== 'xhot-candidate-grid') {
+            var ent = mediaElements.get(a.id);
+            if (ent && ent.el) pool.push({ id: a.id, el: ent.el, label: a.label || '' });
+          }
+        });
+      }
+
+      if (pool.length > 0) {
+        var interval = 0.22; // rapid cut every 220ms
+        var rawIdx = Math.floor(sl / interval);
+        var curIdx = rawIdx % pool.length;
+        var subProgress = (sl % interval) / interval;
+        var item = pool[curIdx];
+        var img = item.el;
+
+        var fw = 640 * S, fh = 400 * S;
+        if (fullscreen) {
+          var fAR = (img.naturalWidth && img.naturalHeight) ? img.naturalWidth / img.naturalHeight : (16 / 9);
+          var fFit = fitFullscreen(fAR);
+          fw = fFit.w; fh = fFit.h;
+        }
+
+        ctx.save();
+        ctx.translate(cx, cy);
+
+        // Subtle punch zoom on each flash cut
+        var punchScale = 1.0 + (1 - easeOutCubic(subProgress)) * 0.04;
+        ctx.scale(punchScale, punchScale);
+
+        rr(ctx, -fw / 2, -fh / 2, fw, fh, 16 * S);
+        ctx.fillStyle = PAL.ink2;
+        ctx.fill();
+
+        ctx.save();
+        rr(ctx, -fw / 2, -fh / 2, fw, fh, 16 * S);
+        ctx.clip();
+        if (img.complete && img.naturalWidth > 0) {
+          ctx.drawImage(img, -fw / 2, -fh / 2, fw, fh);
+        } else {
+          ctx.fillStyle = 'rgba(21, 21, 23, 0.9)';
+          ctx.fillRect(-fw / 2, -fh / 2, fw, fh);
+        }
+
+        // Shutter flash highlight on each rapid cut
+        if (subProgress < 0.35) {
+          var cutAlpha = (1 - subProgress / 0.35) * 0.22;
+          ctx.fillStyle = 'rgba(255, 255, 255, ' + cutAlpha + ')';
+          ctx.fillRect(-fw / 2, -fh / 2, fw, fh);
+        }
+        ctx.restore();
+
+        // High-tech neon border
+        ctx.strokeStyle = 'rgba(0, 240, 255, 0.6)';
+        ctx.lineWidth = 2 * S;
+        rr(ctx, -fw / 2, -fh / 2, fw, fh, 16 * S);
+        ctx.stroke();
+
+        // Flash badge in top-right
+        ctx.save();
+        var badgeText = 'FLASH · ' + String(curIdx + 1).padStart(2, '0') + '/' + String(pool.length).padStart(2, '0');
+        ctx.font = '700 ' + Math.round(12 * S) + 'px ' + FONT;
+        var btw = ctx.measureText(badgeText).width + 20 * S;
+        rr(ctx, fw / 2 - btw - 14 * S, -fh / 2 + 14 * S, btw, 24 * S, 12 * S);
+        ctx.fillStyle = 'rgba(11, 15, 25, 0.88)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(0, 240, 255, 0.7)';
+        ctx.stroke();
+        ctx.fillStyle = '#00F0FF';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(badgeText, fw / 2 - btw / 2 - 14 * S, -fh / 2 + 26 * S);
+        ctx.restore();
+
+        ctx.restore();
+        return;
+      }
+    }
+
     // 1. Chart keyword
     if (id === 'bars' || id === 'line' || id === 'donut') {
       drawChart(ctx, { chart: id, data: visualRef.data, label: label }, cx, cy, 320 * S);
@@ -1236,24 +1329,27 @@ export const PLAYER_JS = `
       rr(ctx, -iw / 2, -ih / 2, iw, ih, 18 * S);
       ctx.stroke();
 
-      var tag = label || (entry.asset?.derivedFrom === 'browser-step' ? 'OPERATION STEP' : 'KEYFRAME IMAGE');
-      ctx.font = '600 ' + Math.round(14 * S) + 'px ' + FONT;
-      var tw2 = ctx.measureText(tag).width + 30 * S;
-      rr(ctx, -tw2 / 2, ih / 2 - 38 * S, tw2, 26 * S, 13 * S);
-      ctx.fillStyle = 'rgba(10, 10, 11, 0.85)';
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(255, 138, 61, 0.4)';
-      ctx.stroke();
+      // Only draw custom label if explicitly given by user/caller; never draw default "KEYFRAME IMAGE" tag
+      var isKeyframeTag = !label || label === 'KEYFRAME IMAGE' || label === 'OPERATION STEP';
+      if (!isKeyframeTag && label) {
+        ctx.font = '600 ' + Math.round(14 * S) + 'px ' + FONT;
+        var tw2 = ctx.measureText(label).width + 30 * S;
+        rr(ctx, -tw2 / 2, ih / 2 - 38 * S, tw2, 26 * S, 13 * S);
+        ctx.fillStyle = 'rgba(10, 10, 11, 0.85)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255, 138, 61, 0.4)';
+        ctx.stroke();
 
-      ctx.beginPath();
-      ctx.arc(-tw2 / 2 + 14 * S, ih / 2 - 25 * S, 3.5 * S, 0, Math.PI * 2);
-      ctx.fillStyle = PAL.ember;
-      ctx.fill();
+        ctx.beginPath();
+        ctx.arc(-tw2 / 2 + 14 * S, ih / 2 - 25 * S, 3.5 * S, 0, Math.PI * 2);
+        ctx.fillStyle = PAL.ember;
+        ctx.fill();
 
-      ctx.fillStyle = PAL.bone;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(tag, -tw2 / 2 + 24 * S, ih / 2 - 25 * S);
+        ctx.fillStyle = PAL.bone;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, -tw2 / 2 + 24 * S, ih / 2 - 25 * S);
+      }
 
       ctx.restore();
       return;
@@ -1699,143 +1795,139 @@ export const PLAYER_JS = `
       var cur = clips[L.cur], nxt = clips[L.next];
       var k = clamp(L.k, 0, 1);
       var dir = ((L.cur % 2) === 0) ? 1 : -1;
-      // Cycle through 3 transition types based on the incoming clip index
-      // 0 = spin (original), 1 = slide-push, 2 = iris-wipe
+      // Cycle through 3 shader-style transition types based on incoming clip index
+      // 0 = Directional Warp & Cross-Zoom Dissolve
+      // 1 = High-tech Luma Scanline Glitch Wipe
+      // 2 = Exposure Bloom & Organic Radial Wipe
       var transType = L.next % 3;
 
-      if (L.next === 0) {
-        drawBG(ctx, nxt, t);
-        var newScale = lerp(0.6, 1, easeOutCubic(k));
-        var newRot = -dir * 0.62 * (1 - k);
-        bNxt.x.clearRect(0, 0, W, H);
-        drawContent(bNxt.x, nxt, k * clipTrans, syncPromiseQueue);
-        ctx.save();
-        ctx.globalAlpha = easeInOutCubic(k);
-        ctx.translate(W / 2, H / 2); ctx.rotate(newRot); ctx.scale(newScale, newScale); ctx.translate(-W / 2, -H / 2);
-        ctx.drawImage(bNxt.c, 0, 0, W, H);
-        ctx.restore();
-        flashAmt = 0.10 * Math.sin(Math.PI * k);
-        lastLoc = { ci: 0, si: 0 };
-      } else if (transType === 1) {
-        // --- SLIDE-PUSH transition ---
-        // Old clip slides out left, new clip slides in from right
+      if (L.next === 0 || transType === 0) {
+        // --- SHADER 1: DIRECTIONAL WARP & CROSS-ZOOM DISSOLVE ---
         drawBG(ctx, cur, t);
         bNxtBG.x.clearRect(0, 0, W, H);
         drawBG(bNxtBG.x, nxt, t);
-        var slideK = easeInOutCubic(k);
-        // Cross-blend backgrounds
+
+        var warpK = easeInOutCubic(k);
         ctx.save();
-        ctx.globalAlpha = slideK;
+        ctx.globalAlpha = warpK;
         ctx.drawImage(bNxtBG.c, 0, 0, W, H);
         ctx.restore();
 
-        // Outgoing content slides left with slight scale-down
+        // Render outgoing clip with directional optical push
         bCur.x.clearRect(0, 0, W, H);
         drawContent(bCur.x, cur, playDur[L.cur], syncPromiseQueue);
-        var slideOutX = -W * slideK * dir;
-        var slideOutScale = lerp(1, 0.88, slideK);
+
+        var curDistortX = -120 * S * warpK * dir;
+        var curScale = lerp(1.0, 1.08, warpK);
         ctx.save();
-        ctx.globalAlpha = 1 - slideK;
-        ctx.translate(W / 2 + slideOutX, H / 2);
-        ctx.scale(slideOutScale, slideOutScale);
+        ctx.globalAlpha = 1 - warpK;
+        ctx.translate(W / 2 + curDistortX, H / 2);
+        ctx.scale(curScale, curScale);
         ctx.translate(-W / 2, -H / 2);
         ctx.drawImage(bCur.c, 0, 0, W, H);
         ctx.restore();
 
-        // Incoming content slides in from opposite side
+        // Render incoming clip with smooth settle zoom
         bNxt.x.clearRect(0, 0, W, H);
         drawContent(bNxt.x, nxt, k * clipTrans, syncPromiseQueue);
-        var slideInX = W * (1 - slideK) * dir;
-        var slideInScale = lerp(0.88, 1, easeOutCubic(k));
+
+        var nxtDistortX = 120 * S * (1 - warpK) * dir;
+        var nxtScale = lerp(0.94, 1.0, easeOutCubic(k));
         ctx.save();
-        ctx.globalAlpha = slideK;
-        ctx.translate(W / 2 + slideInX, H / 2);
-        ctx.scale(slideInScale, slideInScale);
+        ctx.globalAlpha = warpK;
+        ctx.translate(W / 2 + nxtDistortX, H / 2);
+        ctx.scale(nxtScale, nxtScale);
         ctx.translate(-W / 2, -H / 2);
         ctx.drawImage(bNxt.c, 0, 0, W, H);
         ctx.restore();
+
+        flashAmt = 0.08 * Math.sin(Math.PI * k);
+        lastLoc = { ci: L.cur, si: cur.shots.length - 1 };
+      } else if (transType === 1) {
+        // --- SHADER 2: HIGH-TECH LUMA SCANLINE GLITCH WIPE ---
+        drawBG(ctx, cur, t);
+        bNxtBG.x.clearRect(0, 0, W, H);
+        drawBG(bNxtBG.x, nxt, t);
+
+        var glitchK = easeInOutCubic(k);
+        ctx.save();
+        ctx.globalAlpha = glitchK;
+        ctx.drawImage(bNxtBG.c, 0, 0, W, H);
+        ctx.restore();
+
+        bCur.x.clearRect(0, 0, W, H);
+        drawContent(bCur.x, cur, playDur[L.cur], syncPromiseQueue);
+        ctx.save();
+        ctx.globalAlpha = 1 - glitchK * 0.4;
+        ctx.drawImage(bCur.c, 0, 0, W, H);
+        ctx.restore();
+
+        // Incoming clip with scanline bands reveal
+        bNxt.x.clearRect(0, 0, W, H);
+        drawContent(bNxt.x, nxt, k * clipTrans, syncPromiseQueue);
+
+        var scanHeight = H * glitchK;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, W, scanHeight);
+        ctx.clip();
+        ctx.drawImage(bNxt.c, 0, 0, W, H);
+        ctx.restore();
+
+        // Luma glitch scanline beam at boundary
+        if (scanHeight > 2 && scanHeight < H - 2) {
+          ctx.save();
+          var beamGrad = ctx.createLinearGradient(0, scanHeight - 16 * S, 0, scanHeight + 16 * S);
+          beamGrad.addColorStop(0, 'rgba(0, 240, 255, 0)');
+          beamGrad.addColorStop(0.5, 'rgba(0, 240, 255, ' + (0.55 * Math.sin(Math.PI * k)) + ')');
+          beamGrad.addColorStop(1, 'rgba(0, 240, 255, 0)');
+          ctx.fillStyle = beamGrad;
+          ctx.fillRect(0, scanHeight - 16 * S, W, 32 * S);
+          ctx.restore();
+        }
 
         flashAmt = 0.06 * Math.sin(Math.PI * k);
         lastLoc = { ci: L.cur, si: cur.shots.length - 1 };
       } else if (transType === 2) {
-        // --- IRIS-WIPE transition ---
-        // New clip revealed through expanding circular mask from center
+        // --- SHADER 3: EXPOSURE BLOOM & ORGANIC RADIAL WIPE ---
         drawBG(ctx, cur, t);
         bCur.x.clearRect(0, 0, W, H);
         drawContent(bCur.x, cur, playDur[L.cur], syncPromiseQueue);
-        var irisK = easeInOutCubic(k);
-        // Draw old content fading
+        var bloomK = easeInOutCubic(k);
+
         ctx.save();
-        ctx.globalAlpha = 1 - irisK * 0.5;
+        ctx.globalAlpha = 1 - bloomK * 0.6;
         ctx.drawImage(bCur.c, 0, 0, W, H);
         ctx.restore();
 
-        // Draw new background + content into buffer, then mask with circular clip
+        // Draw new background + content into buffer, then mask with expanding oval
         bNxtBG.x.clearRect(0, 0, W, H);
         drawBG(bNxtBG.x, nxt, t);
         bNxt.x.clearRect(0, 0, W, H);
         bNxt.x.drawImage(bNxtBG.c, 0, 0, W, H);
         drawContent(bNxt.x, nxt, k * clipTrans, syncPromiseQueue);
 
-        var irisR = easeOutCubic(k) * Math.hypot(W, H) * 0.58;
+        var rx = easeOutCubic(k) * W * 0.75;
+        var ry = easeOutCubic(k) * H * 0.75;
         ctx.save();
         ctx.beginPath();
-        ctx.arc(W / 2, H / 2, Math.max(1, irisR), 0, Math.PI * 2);
+        ctx.ellipse(W / 2, H / 2, Math.max(1, rx), Math.max(1, ry), 0, 0, Math.PI * 2);
         ctx.clip();
         ctx.drawImage(bNxt.c, 0, 0, W, H);
         ctx.restore();
 
-        // Iris ring glow
-        if (irisR > 2 && irisR < Math.hypot(W, H) * 0.56) {
+        // Soft neon glow edge around the expanding shader oval
+        if (rx > 4 && rx < W * 0.72) {
           ctx.save();
-          ctx.strokeStyle = 'rgba(255, 138, 61, ' + (0.35 * Math.sin(Math.PI * k)) + ')';
-          ctx.lineWidth = 4 * S;
+          ctx.strokeStyle = 'rgba(255, 138, 61, ' + (0.4 * Math.sin(Math.PI * k)) + ')';
+          ctx.lineWidth = 6 * S;
           ctx.beginPath();
-          ctx.arc(W / 2, H / 2, irisR, 0, Math.PI * 2);
+          ctx.ellipse(W / 2, H / 2, rx, ry, 0, 0, Math.PI * 2);
           ctx.stroke();
           ctx.restore();
         }
 
-        flashAmt = 0.08 * Math.sin(Math.PI * k);
-        lastLoc = { ci: L.cur, si: cur.shots.length - 1 };
-      } else {
-        // --- SPIN transition (original, type 0) ---
-        drawBG(ctx, cur, t);
-        bNxtBG.x.clearRect(0, 0, W, H);
-        drawBG(bNxtBG.x, nxt, t);
-        var R = Math.max(0.001, k * Math.hypot(W, H) / 2);
-        var g = bNxtBG.x.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, R);
-        g.addColorStop(0, 'rgba(0,0,0,1)');
-        g.addColorStop(0.82, 'rgba(0,0,0,1)');
-        g.addColorStop(1, 'rgba(0,0,0,0)');
-        bNxtBG.x.globalCompositeOperation = 'destination-in';
-        bNxtBG.x.fillStyle = g; bNxtBG.x.fillRect(0, 0, W, H);
-        bNxtBG.x.globalCompositeOperation = 'source-over';
-        ctx.drawImage(bNxtBG.c, 0, 0, W, H);
-
-        bCur.x.clearRect(0, 0, W, H);
-        drawContent(bCur.x, cur, playDur[L.cur], syncPromiseQueue);
-        var oldScale = 1 + 0.55 * k;
-        var oldRot = dir * 0.62 * k;
-        var oldAlpha = 1 - smoothstep(0, 0.92, k);
-        ctx.save();
-        ctx.globalAlpha = oldAlpha;
-        ctx.translate(W / 2, H / 2); ctx.rotate(oldRot); ctx.scale(oldScale, oldScale); ctx.translate(-W / 2, -H / 2);
-        ctx.drawImage(bCur.c, 0, 0, W, H);
-        ctx.restore();
-
-        var kn = easeInOutCubic(k);
-        var newScale = lerp(0.6, 1, easeOutCubic(k));
-        var newRot = -dir * 0.62 * (1 - k);
-        bNxt.x.clearRect(0, 0, W, H);
-        drawContent(bNxt.x, nxt, k * clipTrans, syncPromiseQueue);
-        ctx.save();
-        ctx.globalAlpha = kn;
-        ctx.translate(W / 2, H / 2); ctx.rotate(newRot); ctx.scale(newScale, newScale); ctx.translate(-W / 2, -H / 2);
-        ctx.drawImage(bNxt.c, 0, 0, W, H);
-        ctx.restore();
-
-        flashAmt = 0.10 * Math.sin(Math.PI * k);
+        flashAmt = 0.09 * Math.sin(Math.PI * k);
         lastLoc = { ci: L.cur, si: cur.shots.length - 1 };
       }
     } else {

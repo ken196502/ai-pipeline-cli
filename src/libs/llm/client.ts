@@ -291,15 +291,17 @@ export async function chat(
 
   const endpoint = `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`;
   const responsesEndpoint = `${config.baseUrl.replace(/\/+$/, '')}/responses`;
+  const hasVisionParts = !isTextOnlyRequest(req.messages);
+  const defaultModel = hasVisionParts ? config.vlModel : config.llmModel;
   const targetModel =
     req.model && req.model.trim() && req.model.trim() !== 'default'
       ? req.model.trim()
-      : config.llmModel;
+      : defaultModel;
 
   // Responses API is only valid for text-only requests; vision (image part)
   // messages keep using the chat-completions endpoint.
   const useResponses =
-    config.apiStyle === 'responses' && isTextOnlyRequest(req.messages);
+    config.apiStyle === 'responses' && !hasVisionParts;
 
   return requestQueue.enqueue(async () => {
     if (useResponses) {
@@ -373,6 +375,11 @@ async function invokeWithRetry(
           response.status,
           retryAfter,
         );
+      }
+
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('text/event-stream')) {
+        return await parseSseChatResponse(response, args.model);
       }
 
       const payload = (await response.json()) as Record<string, unknown>;
@@ -449,6 +456,12 @@ async function rawFetchRequest(
     body.response_format = { type: 'json_object' };
   }
 
+  // Stream text-only chat completions to keep reverse-proxies active during reasoning
+  if (!args.transformBody && isTextOnlyRequest(args.messages)) {
+    body.stream = true;
+    body.stream_options = { include_usage: true };
+  }
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), args.timeoutMs);
 
@@ -515,6 +528,80 @@ function extractUsage(raw: unknown): ChatResult['usage'] {
       ? Math.floor(usage.completion_tokens)
       : 0;
   return { promptTokens, completionTokens };
+}
+
+async function parseSseChatResponse(
+  response: Response,
+  modelName: string,
+): Promise<ChatResult> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new NonRetryableError('LLM SSE stream returned an empty body');
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let content = '';
+  let reasoning = '';
+  let usage: ChatResult['usage'] = null;
+  let resolvedModel = modelName;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line || !line.startsWith('data:')) continue;
+        const dataStr = line.slice(5).trim();
+        if (dataStr === '[DONE]') continue;
+
+        try {
+          const chunk = JSON.parse(dataStr) as Record<string, unknown>;
+          if (typeof chunk.model === 'string' && chunk.model) {
+            resolvedModel = chunk.model;
+          }
+          if (chunk.usage) {
+            usage = extractUsage(chunk.usage);
+          }
+          const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
+          const first = choices[0] as Record<string, unknown> | undefined;
+          const delta = first?.delta as Record<string, unknown> | undefined;
+          if (delta) {
+            if (typeof delta.content === 'string') {
+              content += delta.content;
+            }
+            if (typeof delta.reasoning_content === 'string') {
+              reasoning += delta.reasoning_content;
+            }
+          }
+        } catch {
+          // ignore chunk parse issues
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  let finalContent: string;
+  if (content.trim().length > 0) {
+    finalContent = content;
+  } else if (reasoning.trim().length > 0) {
+    finalContent = reasoning;
+  } else {
+    throw new NonRetryableError('LLM response returned no content or reasoning in stream');
+  }
+
+  return {
+    content: finalContent,
+    model: resolvedModel,
+    usage,
+  };
 }
 
 function parseRetryAfter(header: string | null): number | undefined {

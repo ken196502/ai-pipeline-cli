@@ -61,7 +61,7 @@ export async function produceExplainerVideo(
   const engine = options.engine ?? EXPLAINER_DEFAULTS.engine;
   const subtitles = options.subtitles ?? false;
   const narrationLanguage = options.narrationLanguage ?? 'en';
-  const voice = options.ttsVoice || 'local-clone';
+  const voice = options.ttsVoice || 'Ryan';
   const rate = options.ttsRate ?? '+0%';
   const explainerDirname = options.explainerDirname ?? options.tutorialDirname ?? EXPLAINER_DEFAULTS.explainerDirname;
 
@@ -94,6 +94,7 @@ export async function produceExplainerVideo(
     assets,
     voice,
     rate,
+    instruct: options.ttsInstruct,
     onProgress: (m) => progress('tts', m),
   });
   const totalDurationSec = voiceTrack.totalDurationSec;

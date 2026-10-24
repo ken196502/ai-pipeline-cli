@@ -91,6 +91,17 @@ function parseBalancedCandidate(candidate: string): JsonExtraction {
       }
     }
 
+    // Try repairing missing opening quote on string values ending with ", or "\n
+    const quoteRepaired = candidate.replace(/(:\s*)([^"{\[\d\s\r\n][^"\r\n]*?)",/g, '$1"$2",');
+    if (quoteRepaired !== candidate) {
+      try {
+        const sanitizedRepaired = sanitizeJsonText(quoteRepaired);
+        const value = JSON.parse(sanitizedRepaired.text);
+        console.warn('[llm/json] repaired missing opening quote on JSON string value');
+        return { ok: true, value };
+      } catch {}
+    }
+
     return {
       ok: false,
       reason: `${originalMessage} | near: ${contextAtErrorPosition(candidate, originalMessage)}`,
