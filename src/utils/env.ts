@@ -14,6 +14,8 @@ export const EnvConfigSchema = z.object({
   apiStyle: z.enum(['chat', 'responses']).default('chat'),
   /** Responses API reasoning effort (ignored on the chat path). */
   reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high']).default('minimal'),
+  /** Reserved Google Flow credits threshold (pipeline halts if local record is below this). */
+  flowReservedCredits: z.coerce.number().int().nonnegative().default(0),
 });
 export type EnvConfig = z.infer<typeof EnvConfigSchema>;
 
@@ -94,5 +96,6 @@ export function getEnvConfig(): EnvConfig {
     imageModel: process.env.IMAGE_MODEL || 'sensenova-u1-fast',
     apiStyle: (process.env.LLM_API_STYLE as 'chat' | 'responses' | undefined) || 'chat',
     reasoningEffort: (process.env.LLM_REASONING_EFFORT as 'minimal' | 'low' | 'medium' | 'high' | undefined) || 'minimal',
+    flowReservedCredits: Number(process.env.FLOW_RESERVED_CREDITS || process.env.FLOW_MIN_CREDITS_THRESHOLD || 0),
   });
 }

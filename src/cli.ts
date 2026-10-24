@@ -11,6 +11,7 @@
 import { Command } from 'commander';
 import pc from 'picocolors';
 import { attachXHotOptions, handleXHotCommand } from './pipelines/xhot/cli.js';
+import { attachViralOptions as attachYtbHotOptions, handleViralCommand as handleYtbHotCommand } from './pipelines/ytbhot/cli.js';
 
 /**
  * Normalize em-dash/en-dash flags (e.g. —24h or –topics copied from chat/docs)
@@ -43,23 +44,31 @@ async function main() {
     await handleXHotCommand(query, opts);
   });
 
-  // ── Future pipelines will be registered here ──────────────────
-  // e.g.:
-  // const ytCmd = program.command('yt-shorts').description('...');
-  // attachYTOptions(ytCmd);
-  // ytCmd.action(async (opts) => { ... });
+  // ── Ytbhot (YouTube Viral Video Maker) Sub-command ────────────
+  const ytbhotCmd = program
+    .command('ytbhot')
+    .alias('viral')
+    .alias('viral-video-maker')
+    .description('Ytbhot: YouTube viral video research evaluation, Flow Veo synthesis, and AI tutorial video');
+
+  attachYtbHotOptions(ytbhotCmd);
+
+  ytbhotCmd.action(async (query: string, opts: any) => {
+    await handleYtbHotCommand(query, opts);
+  });
 
   // ── Default action (no sub-command) ───────────────────────────
   program.action(() => {
     console.log(pc.bold(pc.cyan('\n🚀 AIGC Pipeline Platform v2.0.0\n')));
     console.log('Available pipelines:\n');
-    console.log(`  ${pc.bold('xhot')}    Xhot Trending Video — discover hot topics on X, evaluate, harvest, and render explainer video`);
+    console.log(`  ${pc.bold('xhot')}      Xhot Trending Video — discover hot topics on X, evaluate, harvest, and render explainer video`);
+    console.log(`  ${pc.bold('ytbhot')}    YouTube Hot Video Maker — YouTube candidate research, Flow Veo synthesis, and explainer video`);
     console.log();
     console.log(`Run ${pc.cyan('aigc <pipeline> --help')} for pipeline-specific options.\n`);
     console.log('Examples:');
     console.log(`  ${pc.dim('$')} aigc xhot "new model"`);
-    console.log(`  ${pc.dim('$')} aigc xhot --topics "AI;deepseek r1" --24h`);
-    console.log(`  ${pc.dim('$')} aigc xhot --dry-run\n`);
+    console.log(`  ${pc.dim('$')} aigc ytbhot "AI make Niche Viral Video"`);
+    console.log(`  ${pc.dim('$')} aigc xhot --topics "AI;deepseek r1" --24h\n`);
   });
 
   const normalizedArgv = normalizeArgv(process.argv);

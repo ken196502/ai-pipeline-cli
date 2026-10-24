@@ -75,3 +75,5 @@ export interface XHotFullResult {
   reportHtmlPath?: string;
   reportJsonPath?: string;
 }
+
+export type XHotPipelineResult = XHotFullResult;

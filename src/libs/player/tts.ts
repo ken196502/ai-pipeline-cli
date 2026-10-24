@@ -77,7 +77,7 @@ async function executeSingleQwen3TtsAttempt(
 ): Promise<{ audioBuffer: Buffer; durationSec: number; words: ExplainerWord[] }> {
   loadEnvFile();
   const baseUrl = resolveQwen3TtsUrl(options.url);
-  const timeoutMs = options.timeoutMs ?? 180_000;
+  const timeoutMs = options.timeoutMs ?? 300_000;
   const speaker = options.speaker || 'Ryan';
   const language = options.language || 'Auto';
   const instruct = options.instruct !== undefined ? options.instruct : 'Speak in a calm, steady, professional documentary narrator tone.';
@@ -296,6 +296,9 @@ export async function synthesizeQwen3Tts(
 ): Promise<{ audioBuffer: Buffer; durationSec: number; words: ExplainerWord[] }> {
   loadEnvFile();
   const maxRetries = options.maxRetries ?? 3;
+  // A single long narration line can take ~2 minutes on the shared Space.
+  // Keep enough headroom so a normal slow generation is not aborted at 180s.
+  const timeoutMs = options.timeoutMs ?? 300_000;
   let lastError: any = null;
   let currentToken = options.token || process.env.HF_TOKEN;
 
@@ -303,11 +306,15 @@ export async function synthesizeQwen3Tts(
     try {
       return await executeSingleQwen3TtsAttempt(text, {
         ...options,
+        timeoutMs,
         token: currentToken,
       });
     } catch (err: any) {
       lastError = err;
       const errMsg = err?.message || '';
+      const isTimeout =
+        err?.name === 'TimeoutError' ||
+        /aborted due to timeout|timed out|timeout/i.test(errMsg);
 
       // If a free Hugging Face token is rejected because free account quota is 0s,
       // drop the token to let the request use the proxy IP quota.
@@ -316,6 +323,13 @@ export async function synthesizeQwen3Tts(
           `[tts] HF_TOKEN is a free tier account with 0s quota. Switching to proxy IP quota for Qwen3-TTS...`
         );
         currentToken = '';
+        continue;
+      }
+
+      if (isTimeout && attempt < maxRetries) {
+        console.warn(
+          `[tts] Qwen3-TTS request timed out after ${Math.round(timeoutMs / 1000)}s; retrying ${attempt + 1}/${maxRetries}...`
+        );
         continue;
       }
 
@@ -445,6 +459,8 @@ export interface SynthesizeNarrationOptions {
   instruct?: string;
   pythonBin?: string;
   cwd?: string;
+  /** Per-line TTS request timeout (default 300s for Qwen3-TTS). */
+  timeoutMs?: number;
 }
 
 /**
@@ -496,12 +512,14 @@ export async function synthesizeNarrationSegment(
   if (options.ttsUrl && options.ttsUrl.includes('192.168.')) {
     synthResult = await synthesizeLocalTts(request.text, {
       url: options.ttsUrl,
+      timeoutMs: options.timeoutMs,
     });
   } else {
     synthResult = await synthesizeQwen3Tts(request.text, {
       url: options.ttsUrl,
       speaker: options.voice,
       instruct: options.instruct,
+      timeoutMs: options.timeoutMs,
     });
   }
 
@@ -863,6 +881,8 @@ export async function buildOpusVoiceTrack(params: {
   sampleRate?: number;
   ttsUrl?: string;
   onProgress?: (message: string) => void;
+  /** Per-line TTS request timeout in milliseconds. */
+  ttsTimeoutMs?: number;
 }): Promise<OpusVoiceTrackResult> {
   const { clips, outAudioDir } = params;
   const voice = params.voice || 'local-clone';
@@ -963,14 +983,14 @@ export async function buildOpusVoiceTrack(params: {
             audioParts.push(segWavPath);
           } else {
             const segAudioPath = path.join(workDir, `clip-${ci}-shot-${si}-line-${li}.wav`);
-            params.onProgress?.(`Synthesizing narration (local TTS): clip ${ci + 1}/${clips.length}, shot ${si + 1}/${clip.shots.length}, line ${li + 1}/${shot.elements.length}`);
+            params.onProgress?.(`Synthesizing narration (TTS): clip ${ci + 1}/${clips.length}, shot ${si + 1}/${clip.shots.length}, line ${li + 1}/${shot.elements.length}`);
             const seg = await synthesizeNarrationSegment(
               {
                 sceneId: `${clip.id}_${shot.id}_${li}`,
                 text: lineText,
                 outAudioPath: segAudioPath,
               },
-              { voice, rate, instruct: params.instruct, ttsUrl: params.ttsUrl }
+              { voice, rate, instruct: params.instruct, ttsUrl: params.ttsUrl, timeoutMs: params.ttsTimeoutMs }
             );
 
             // Convert line segment to PCM WAV for seamless concatenation

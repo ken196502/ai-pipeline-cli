@@ -24,7 +24,10 @@ export async function buildExplainerAssets(
   assetsOutDir: string
 ): Promise<ExplainerAsset[]> {
   await fs.mkdir(assetsOutDir, { recursive: true });
-  const assets: ExplainerAsset[] = [];
+  // Xhot-specific material preparation only: the shared explainer-video module
+  // still receives plain video/image assets and owns the fullscreen layout.
+  const videoAssets: ExplainerAsset[] = [];
+  const imageAssets: ExplainerAsset[] = [];
 
   // 1. Candidate Grid & Individual Candidate Shots (Flash Montage)
   if (evalResult.gridImagePath) {
@@ -32,7 +35,7 @@ export async function buildExplainerAssets(
       const ext = path.extname(evalResult.gridImagePath) || '.png';
       const dest = path.join(assetsOutDir, `xhot-grid${ext}`);
       await fs.copyFile(evalResult.gridImagePath, dest);
-      assets.push({
+      imageAssets.push({
         id: 'xhot-candidate-grid',
         kind: 'image',
         label: `X Topic Search Grid: ${evalResult.query}`,
@@ -51,7 +54,7 @@ export async function buildExplainerAssets(
         const destPath = path.join(assetsOutDir, entry);
         await fs.copyFile(srcPath, destPath);
         const candId = entry.replace(/\.[^.]+$/, '');
-        assets.push({
+        imageAssets.push({
           id: candId,
           kind: 'image',
           label: `Trending Candidate: ${candId}`,
@@ -72,7 +75,7 @@ export async function buildExplainerAssets(
       try {
         const dest = path.join(assetsOutDir, `${prefix}-shot.png`);
         await fs.copyFile(item.screenshotPath, dest);
-        assets.push({
+        imageAssets.push({
           id: `${prefix}-shot`,
           kind: 'image',
           label: `Tweet by ${item.authorName} (${item.authorHandle})`,
@@ -90,10 +93,14 @@ export async function buildExplainerAssets(
       const destPath = path.join(assetsOutDir, destName);
       try {
         await fs.copyFile(media.localPath, destPath);
-        assets.push({
+        const target = media.kind === 'video' ? videoAssets : imageAssets;
+        target.push({
           id: `${prefix}-${media.kind}-${m + 1}`,
           kind: media.kind,
-          label: `${media.kind === 'video' ? 'Demo Video' : 'Visual Preview'} from ${item.authorHandle}`,
+          label:
+            media.kind === 'video'
+              ? `PRIORITY DEMO VIDEO from ${item.authorHandle} — use this instead of the tweet screenshot`
+              : `Visual Preview from ${item.authorHandle}`,
           src: `assets/${destName}`,
           sourcePath: destPath,
         });
@@ -101,7 +108,8 @@ export async function buildExplainerAssets(
     }
   }
 
-  return assets;
+  // Videos first so the storyboard LLM naturally prefers real demo footage.
+  return [...videoAssets, ...imageAssets];
 }
 export const buildXHotTutorialAssets = buildExplainerAssets;
 
@@ -114,8 +122,13 @@ export async function generateExplainerStoryboardFromXHot(
   assets: ExplainerAsset[]
 ): Promise<ExplainerStoryboard> {
   const assetListText = assets
-    .map((a) => `- "${a.id}" (${a.kind}): ${a.label}`)
+    .map((a) =>
+      a.kind === 'video'
+        ? `- "${a.id}" (video, PRIORITY MATERIAL): ${a.label}`
+        : `- "${a.id}" (${a.kind}): ${a.label}`
+    )
     .join('\n');
+  const videoAssetIds = assets.filter((a) => a.kind === 'video').map((a) => a.id);
 
   let maskedTweetCount = 0;
   const tweetSummaries = harvestResult.items
@@ -164,12 +177,16 @@ ${assetListText}
 ${tweetSummaries}
 
 【Requirements】
+0. VIDEO MATERIAL PRIORITY (MANDATORY):
+   - Available video assets: ${videoAssetIds.length > 0 ? videoAssetIds.map((id) => `'${id}'`).join(', ') : 'none'}.
+   - Whenever a harvested tweet has a video attachment, you MUST use that video asset as the visual for that tweet instead of its static screenshot ('*-shot').
+   - Reserve static tweet screenshots mainly for community-reaction/proof shots where no video exists. Never let a screenshot replace an available demo video in the Live Demos / Visual Showcase chapter.
 1. Structure the presentation video into 4 or 5 concise chapters:
    - Chapter 0 (Overview/Hook): The emerging topic and trending landscape on X.
      * IMPORTANT: For the opening hook, DO NOT use a static candidate grid ('xhot-candidate-grid'). Instead, use visualRef: 'flash' (or 'flash:candidates') so the video dynamically cuts through candidate snapshots in a fast-paced montage!
    - Chapter 1 (The Winner Announcement): Introduce ${evalResult.winner.name}, its core technical capability, and why it ranks at the top.
    - Chapter 2 (Community Reactions & Proof): Showcase real discussions and user reaction tweets (use tweet shot assets like 'tweet-01-shot', 'tweet-02-shot').
-   - Chapter 3 (Live Demos / Visual Showcase): Feature demo video or media image assets from the tweets (e.g. 'tweet-01-video-1', 'tweet-01-image-1', etc.).
+   - Chapter 3 (Live Demos / Visual Showcase): Feature demo video or media image assets from the tweets (e.g. 'tweet-01-video-1', 'tweet-01-image-1', etc.). Prefer every available '*-video-*' asset here before falling back to screenshots or images.
    - Chapter 4 (Future & Perspective): Strategic industry context and balanced forward takeaway.
 2. In each shot:
    - Provide 2 to 3 elements.

@@ -32,6 +32,7 @@
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { DDIN_EXP_FONTS_CSS } from './fonts-data.js';
 import type {
   ExplainerTimeline,
   ExplainerAsset,
@@ -189,7 +190,7 @@ export function normalizeTimeline(timeline: ExplainerTimeline): {
       design: { w: width, h: height },
       bg: timeline.meta?.bg || '#0A0A0B',
       accent: timeline.meta?.accent || '#FF4D12',
-      font: timeline.meta?.font || 'Inter, "Segoe UI", system-ui, -apple-system, sans-serif',
+      font: timeline.meta?.font || '"D-DIN Exp", "D-DIN", Inter, "Segoe UI", system-ui, -apple-system, sans-serif',
       shotDur: timeline.meta?.shotDur || 4.2,
       shotTrans: timeline.meta?.shotTrans || 0.8,
       clipTrans: timeline.meta?.clipTrans || 1.0,
@@ -204,6 +205,8 @@ export function normalizeTimeline(timeline: ExplainerTimeline): {
 }
 
 export const PLAYER_CSS = `
+${DDIN_EXP_FONTS_CSS}
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 html, body {
@@ -211,7 +214,7 @@ html, body {
   height: 100%;
   background: #05060c;
   color: #e8ebf5;
-  font-family: Inter, "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-family: "D-DIN Exp", "D-DIN", Inter, "Segoe UI", system-ui, -apple-system, sans-serif;
   overflow: hidden;
 }
 

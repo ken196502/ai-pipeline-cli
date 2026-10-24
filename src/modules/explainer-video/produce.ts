@@ -294,39 +294,62 @@ export interface GenerateExplainerStoryboardParams {
 export async function generateExplainerStoryboard(
   params: GenerateExplainerStoryboardParams
 ): Promise<ExplainerStoryboard> {
-  const rawResponse = await chat({
-    messages: [
-      { role: 'system', content: params.systemPrompt },
-      { role: 'user', content: params.userPrompt },
-    ],
-    temperature: params.temperature ?? 0.3,
-    context: { stage: 'explainer', task: params.contextTask ?? 'storyboard' },
-  });
+  // Models occasionally truncate a long JSON storyboard (or stream ends early).
+  // The chat client already retries transport/5xx errors; here we retry only
+  // when the returned payload itself is unusable, so a malformed completion
+  // does not fail the whole video stage.
+  const MAX_ATTEMPTS = 2;
+  let lastError: Error | undefined;
 
-  const extraction = extractJsonObject(rawResponse.content);
-  if (!extraction.ok) {
-    throw new Error(`LLM did not return a valid JSON storyboard payload: ${extraction.reason}`);
-  }
-  const parsed = extraction.value as any;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const rawResponse = await chat({
+      messages: [
+        { role: 'system', content: params.systemPrompt },
+        { role: 'user', content: params.userPrompt },
+      ],
+      temperature: params.temperature ?? 0.3,
+      context: { stage: 'explainer', task: params.contextTask ?? 'storyboard' },
+    });
 
-  try {
-    return ExplainerStoryboardSchema.parse(parsed);
-  } catch (err: any) {
-    console.warn(pc.yellow(`[explainer] Storyboard validation issue, attempting repair: ${err.message}`));
-    // Repair common defects: ensure meta, fallback title, wrap shots
-    parsed.meta = parsed.meta || {};
-    parsed.meta.title = parsed.meta.title || parsed.title || params.fallbackTitle;
-    parsed.meta.design = parsed.meta.design || { w: 1920, h: 1080 };
-    parsed.clips = parsed.clips || [];
+    try {
+      const extraction = extractJsonObject(rawResponse.content);
+      if (!extraction.ok) {
+        throw new Error(`LLM did not return a valid JSON storyboard payload: ${extraction.reason}`);
+      }
+      const parsed = extraction.value as any;
 
-    for (const clip of parsed.clips) {
-      clip.shots = clip.shots || [];
-      for (const shot of clip.shots) {
-        shot.elements = shot.elements || [['Visual Showcase', 'sparkles']];
-        shot.narration = shot.narration || ['Introducing this key milestone.'];
+      try {
+        return ExplainerStoryboardSchema.parse(parsed);
+      } catch (err: any) {
+        console.warn(pc.yellow(`[explainer] Storyboard validation issue, attempting repair: ${err.message}`));
+        // Repair common defects: ensure meta, fallback title, wrap shots
+        parsed.meta = parsed.meta || {};
+        parsed.meta.title = parsed.meta.title || parsed.title || params.fallbackTitle;
+        parsed.meta.design = parsed.meta.design || { w: 1920, h: 1080 };
+        parsed.clips = parsed.clips || [];
+
+        for (const clip of parsed.clips) {
+          clip.shots = clip.shots || [];
+          for (const shot of clip.shots) {
+            shot.elements = shot.elements || [['Visual Showcase', 'sparkles']];
+            shot.narration = shot.narration || ['Introducing this key milestone.'];
+          }
+        }
+
+        return ExplainerStoryboardSchema.parse(parsed);
+      }
+    } catch (err: any) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (attempt < MAX_ATTEMPTS) {
+        console.warn(
+          pc.yellow(
+            `[explainer] Storyboard payload unusable (${lastError.message}); retrying ${attempt + 1}/${MAX_ATTEMPTS}...`
+          )
+        );
+        continue;
       }
     }
-
-    return ExplainerStoryboardSchema.parse(parsed);
   }
+
+  throw lastError ?? new Error('LLM did not return a valid JSON storyboard payload');
 }

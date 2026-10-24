@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+export type { PipelineExecutionContext as PipelineContext } from './context.js';
+
 export interface PipelineStageDef {
   id: string;
   name: string;
@@ -23,11 +25,12 @@ export interface Pipeline<TOptions = any, TResult = any> {
   name: string;
   description: string;
   schema: z.ZodType<TOptions, any, any>;
-  stages: PipelineStageDef[];
+  stages: readonly PipelineStageDef[] | PipelineStageDef[];
   execute: (options: TOptions, ctx?: any) => Promise<TResult>;
   reports?: {
     generateMarkdownReport?: (result: TResult) => string;
     generateJsonReport?: (result: TResult) => string;
+    saveReports?: (result: TResult, outDir: string) => Promise<{ jsonPath: string; markdownPath: string }>;
     printSummary?: (result: TResult) => void;
   };
 }

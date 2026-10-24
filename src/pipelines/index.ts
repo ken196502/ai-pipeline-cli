@@ -8,15 +8,33 @@
  */
 import { pipelineRegistry } from './core/registry.js';
 import { xhotPipeline } from './xhot/execute.js';
+import { ytbhotPipeline } from './ytbhot/execute.js';
 
 // ── Auto-register available pipelines ───────────────────────────
 pipelineRegistry.register(xhotPipeline);
-
-// Future pipelines:
-// import { ytShortsPipeline } from './yt-shorts/execute.js';
-// pipelineRegistry.register(ytShortsPipeline);
+pipelineRegistry.register(ytbhotPipeline);
 
 // ── Exports ─────────────────────────────────────────────────────
 export * from './core/index.js';
-export * from './xhot/index.js';
+export {
+  xhotPipeline,
+  executeXHotPipeline,
+  type XHotPipelineOptions,
+  type XHotPipelineResult,
+  type XHotFullResult,
+  XHOT_STAGES,
+  XHotPipelineOptionsSchema,
+  generateFinalReportMarkdown,
+  generateFinalReportJson,
+  saveFinalReports,
+  printExecutiveSummary,
+  attachXHotOptions,
+  handleXHotCommand,
+} from './xhot/index.js';
+export {
+  ytbhotPipeline,
+  executeViralVideo as executeYtbHotPipeline,
+  type ViralPipelineOptions as YtbHotPipelineOptions,
+  type ViralPipelineResult as YtbHotPipelineResult,
+} from './ytbhot/index.js';
 export { pipelineRegistry };

@@ -17,18 +17,27 @@ export * as evaluationModule from './evaluation/index.js';
 export * as harvestModule from './harvest/index.js';
 export * as explainerVideoModule from './explainer-video/index.js';
 export * as presentationModule from './explainer-video/index.js';
+export * as flowModule from './flow/index.js';
+export * as youtubeModule from './youtube/index.js';
+export * as scriptModule from './script/index.js';
 
 export { testAuthModule } from './auth/index.js';
 export { testDiscoveryModule } from './discovery/index.js';
 export { testEvaluationModule } from './evaluation/index.js';
 export { testHarvestModule } from './harvest/index.js';
 export { testExplainerVideoModule, testPresentationModule } from './explainer-video/index.js';
+export { testFlowModule } from './flow/index.js';
+export { testResearchModule as testYoutubeModule } from './youtube/index.js';
+export { testScriptModule } from './script/index.js';
 
 export * from './auth/index.js';
 export * from './discovery/index.js';
 export * from './evaluation/index.js';
 export * from './harvest/index.js';
 export * from './explainer-video/index.js';
+export * from './flow/index.js';
+export * from './youtube/index.js';
+export * from './script/index.js';
 
 /**
  * Executes isolated self-tests across all 5 modules one by one.

@@ -71,7 +71,7 @@ export const ExplainerMetaSchema = z.object({
   design: ExplainerMetaDesignSchema.default({ w: 1920, h: 1080 }),
   bg: z.string().default('#0A0A0B'),
   accent: z.string().default('#FF4D12'),
-  font: z.string().default('Inter, "Segoe UI", system-ui, -apple-system, sans-serif'),
+  font: z.string().default('"D-DIN Exp", "D-DIN", Inter, "Segoe UI", system-ui, -apple-system, sans-serif'),
   shotDur: z.number().positive().default(4.2),
   shotTrans: z.number().positive().default(0.8),
   clipTrans: z.number().positive().default(1.0),
