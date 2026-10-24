@@ -9,6 +9,12 @@ export interface WebhookConfig {
   webhookUrl: string;
   webhookToken: string;
   notifyTo: string;
+  /**
+   * Bot name for multi-bot gateways (pi-telegram-server `TELEGRAM_BOTS`).
+   * When the gateway serves more than one bot it rejects requests without it.
+   * Resolved from PI_TELEGRAM_BOT / TELEGRAM_BOT; never guessed.
+   */
+  bot?: string;
 }
 
 export interface WebhookSendResult {
@@ -52,10 +58,14 @@ export function getWebhookConfig(override?: Partial<WebhookConfig>): WebhookConf
     throw new Error('Missing required environment variable: NOTIFY_TO (or TELEGRAM_TO) must be defined');
   }
 
+  const rawBot = override?.bot ?? process.env.PI_TELEGRAM_BOT ?? process.env.TELEGRAM_BOT;
+  const bot = rawBot && rawBot.trim() ? rawBot.trim() : undefined;
+
   return {
     webhookUrl: webhookUrl.trim(),
     webhookToken: webhookToken.trim(),
     notifyTo: notifyTo.trim(),
+    ...(bot ? { bot } : {}),
   };
 }
 
@@ -100,6 +110,7 @@ export async function sendMsg(
   }
 
   const body: Record<string, string> = { to: config.notifyTo, message };
+  if (config.bot) body.bot = config.bot;
   if (attachment) {
     body.filePath = attachment.filePath.trim();
     if (attachment.fileName?.trim()) body.fileName = attachment.fileName.trim();
@@ -125,8 +136,12 @@ export async function sendMsg(
   const bodyText = await res.text().catch(() => '');
 
   if (!res.ok) {
+    const hint =
+      res.status === 400 && /multiple bots configured/i.test(bodyText)
+        ? ' (gateway runs multiple bots: set PI_TELEGRAM_BOT=<name> in the environment)'
+        : '';
     throw new Error(
-      `[send_msg] Webhook responded with error HTTP ${res.status}: ${bodyText || res.statusText}`
+      `[send_msg] Webhook responded with error HTTP ${res.status}: ${bodyText || res.statusText}${hint}`
     );
   }
 
