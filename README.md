@@ -98,6 +98,9 @@ X_PWD=your_x_password
 WEBHOOK_URL=http://...
 WEBHOOK_TOKEN=...
 NOTIFY_TO=...
+# 当 webhook 网关为多 bot 模式（pi-telegram-server 的 TELEGRAM_BOTS）时必须指定，
+# 否则网关返回 HTTP 400 "multiple bots configured"，所有通知都会丢失
+PI_TELEGRAM_BOT=main
 ```
 
 ---
