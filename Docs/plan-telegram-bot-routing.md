@@ -74,3 +74,33 @@ AIGC-pipeline 跑完 / 失败后，Telegram 收不到任何消息。tmux `xhot-p
 
 已知边界：`loadEnvFile()` 仅在变量未设置时写入，因此在 pi 会话 shell 里运行会继承该会话的
 `PI_TELEGRAM_BOT`。要固定 bot，请用干净 shell 或同时显式导出 bot 与 `PI_INBOUND_URL`。
+
+## 追加 2：启动期自检 `PI_TELEGRAM_BOT_PORTS`（2026-10-24）
+
+问题：`.env` 里的 `PI_INBOUND_URL` 与 `process.env` 里继承来的 `PI_TELEGRAM_BOT`
+可能指向不同的 bot（如 bot=inspilot 但 inbound=3094/main），告警会注入错的 Pi 会话。
+
+做法：新增**显式**映射变量，不写就完全不检查（绝不猜端口）。
+
+```ini
+PI_TELEGRAM_BOT_PORTS=main:3094,inspilot:3095
+```
+
+规则（`src/utils/send_msg.ts`）：
+
+- `parseBotPortMap()`：解析 `<bot>:<port>` 逗号列表；空串/未设置 → `undefined`（跳过检查）；
+  空条目、缺 `:`、非整数端口、端口越界、重名 bot → 直接抛错。
+- `assertBotPortConsistency(bot, inboundUrl, map)`：
+  - 未配置映射 → 直接返回（不猜）；
+  - bot 不在映射里 → 报错并列出已知 bot（拦拼写错误）；
+  - `PI_INBOUND_URL` 端口与该 bot 的端口不一致 → 报错（URL 未写端口时按协议默认 80/443 判定）。
+- `getWebhookConfig()`：映射存在时，未知 bot 直接报错。
+- `getPiInboundConfig()`：映射存在且 `PI_TELEGRAM_BOT` 有值时校验端口一致性。
+- `verifyNotificationConfig()`：一次性解析 webhook + inbound 并做完整校验，返回摘要供日志使用。
+- 启动期接入：`pipelines/core/stages.ts` 与 `pipelines/xhot/stages/check-env.ts` 的
+  Stage 1 第一步调用；测试环境（`isTestEnvironment()`）显式跳过并写日志，
+  避免 `npm test` 受当前 shell 的 bot 变量影响。
+
+副作用（重要）：在 pi 会话 shell 里跑流水线而未成对导出变量时，Stage 1 会直接失败，
+而不是跑一小时后丢掉所有告警。`tests/runner-24h.test.ts` 的 dry-run 用例曾因
+check-env 失败被 24h 循环无限重试而挂起，现已由测试环境跳过修复。

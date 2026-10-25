@@ -7,7 +7,11 @@ import { ensureProfileDir } from '../../../utils/browser.js';
 import { ensureYtDlp } from '../../../libs/media/ytdlp.js';
 import { resolveFfmpegBin } from '../../../libs/media/frames.js';
 import { checkPuterAsrReady } from '../../../libs/asr/index.js';
-import { notifyLlmUnavailableAndExit } from '../../../utils/send_msg.js';
+import {
+  isTestEnvironment,
+  notifyLlmUnavailableAndExit,
+  verifyNotificationConfig,
+} from '../../../utils/send_msg.js';
 
 import type { EnvCheckSummary } from '../contracts.js';
 import type { RunLogger } from '../../../utils/logger.js';
@@ -20,6 +24,18 @@ export async function checkEnvStage(
 ): Promise<EnvCheckSummary> {
   const profileDir = await ensureProfileDir(options.profileDir);
   const envConfig = getEnvConfig();
+
+  // Notification channels first: fail fast instead of losing every alert later.
+  // Test runs deliver no alerts, so the ambient bot/port config is irrelevant there.
+  if (isTestEnvironment()) {
+    logger?.info('Stage 1: Notification self-check skipped (test environment)');
+  } else {
+    const notifications = verifyNotificationConfig();
+    logger?.info(
+      `Stage 1: Verified notification channels: bot=${notifications.bot}, chat=${notifications.notifyTo}, ` +
+        `webhook=${notifications.webhookUrl}, pi-inbound=${notifications.inboundUrl}`
+    );
+  }
 
   // 1. LLM Verification via curl (mandatory)
   logger?.info('Stage 1: Verifying LLM gateway connectivity via curl...');

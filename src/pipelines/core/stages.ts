@@ -23,7 +23,11 @@ import {
 import { verifyCookies } from '../../utils/cookies.js';
 import { ensureYtDlp } from '../../utils/ytdlp.js';
 import { resolveFfmpegBin } from '../../research/youtube/ytdlp.js';
-import { notifyLlmUnavailableAndExit } from '../../utils/send_msg.js';
+import {
+  isTestEnvironment,
+  notifyLlmUnavailableAndExit,
+  verifyNotificationConfig,
+} from '../../utils/send_msg.js';
 import {
   assertFlowCreditsThreshold,
 } from '../../flow/quota.js';
@@ -79,6 +83,20 @@ export async function checkEnvStage(
   options: { profileDir?: string; storageDir?: string; pipelineId?: string },
   logger?: RunLogger
 ): Promise<EnvCheckSummary> {
+  // 0. Notification channels must be valid before anything else: a pipeline that
+  // cannot deliver alerts is not allowed to burn an hour of work silently.
+  // Test runs deliver no alerts at all, so the ambient bot/port config is not
+  // meaningful there — the check is skipped explicitly, not silently bypassed.
+  if (isTestEnvironment()) {
+    logger?.info('Stage 1: Notification self-check skipped (test environment)');
+  } else {
+    const notifications = verifyNotificationConfig();
+    logger?.info(
+      `Stage 1: Verified notification channels: bot=${notifications.bot}, chat=${notifications.notifyTo}, ` +
+        `webhook=${notifications.webhookUrl}, pi-inbound=${notifications.inboundUrl}`
+    );
+  }
+
   // 0. Flow Credit Threshold Pre-Check (first step of every run)
   const reservedThreshold = getFlowReservedCredits();
   const pipelineId = options.pipelineId || 'viral-video-maker';

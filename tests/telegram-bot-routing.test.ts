@@ -15,7 +15,14 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { after, before, test } from 'node:test';
-import { getPiInboundConfig, getWebhookConfig, sendMsg } from '../src/utils/send_msg.js';
+import {
+  assertBotPortConsistency,
+  getPiInboundConfig,
+  getWebhookConfig,
+  parseBotPortMap,
+  sendMsg,
+  verifyNotificationConfig,
+} from '../src/utils/send_msg.js';
 
 interface CapturedRequest {
   authorization: string;
@@ -163,36 +170,132 @@ test('Pi inbound requires PI_INBOUND_URL (no hardcoded host/port)', () => {
   );
 });
 
-test('Pi inbound requires PI_TELEGRAM_INBOUND_TOKEN (no hardcoded token)', () => {
-  assert.throws(
-    () => getPiInboundConfig({ inboundUrl: 'http://127.0.0.1:3094/telegram/inbound', inboundToken: '', senderId: '1' }),
-    /PI_TELEGRAM_INBOUND_TOKEN/
-  );
-});
-
-test('Pi inbound ignores the INBOUND_WEBHOOK_TOKEN alias', () => {
-  assert.throws(
-    () =>
-      getPiInboundConfig({
-        inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
-        inboundToken: '',
-        senderId: '1',
-      }),
-    /PI_TELEGRAM_INBOUND_TOKEN/,
-    'a blank explicit token must not fall back to INBOUND_WEBHOOK_TOKEN'
-  );
-});
-
-test('Pi inbound resolves the configured endpoint and sender', () => {
-  const config = getPiInboundConfig({
-    inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
-    inboundToken: 'Abcd#123456',
-    senderId: '5971350987',
+test('Pi inbound requires PI_TELEGRAM_INBOUND_TOKEN (no hardcoded token)', async () => {
+  await withEnv({ PI_TELEGRAM_BOT: 'main' }, () => {
+    assert.throws(
+      () =>
+        getPiInboundConfig({
+          inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
+          inboundToken: '',
+          senderId: '1',
+        }),
+      /PI_TELEGRAM_INBOUND_TOKEN/
+    );
   });
-  assert.deepEqual(config, {
-    inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
-    inboundToken: 'Abcd#123456',
-    senderId: '5971350987',
-    chatId: '5971350987',
+});
+
+test('Pi inbound ignores the INBOUND_WEBHOOK_TOKEN alias', async () => {
+  await withEnv({ PI_TELEGRAM_BOT: 'main', INBOUND_WEBHOOK_TOKEN: 'alias-token' }, () => {
+    assert.throws(
+      () =>
+        getPiInboundConfig({
+          inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
+          inboundToken: '',
+          senderId: '1',
+        }),
+      /PI_TELEGRAM_INBOUND_TOKEN/,
+      'a blank explicit token must not fall back to INBOUND_WEBHOOK_TOKEN'
+    );
+  });
+});
+
+test('Pi inbound resolves the configured endpoint and sender', async () => {
+  await withEnv({ PI_TELEGRAM_BOT: 'main' }, () => {
+    const config = getPiInboundConfig({
+      inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
+      inboundToken: 'Abcd#123456',
+      senderId: '5971350987',
+    });
+    assert.deepEqual(config, {
+      inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
+      inboundToken: 'Abcd#123456',
+      senderId: '5971350987',
+      chatId: '5971350987',
+    });
+  });
+});
+
+// ── PI_TELEGRAM_BOT_PORTS: explicit bot → inbound port self-check ──────────────
+
+test('parseBotPortMap: unset/blank disables the check', () => {
+  assert.equal(parseBotPortMap(undefined), undefined);
+  assert.equal(parseBotPortMap('   '), undefined);
+});
+
+test('parseBotPortMap: parses an explicit mapping, lowercasing bot names', () => {
+  assert.deepEqual(parseBotPortMap('main:3094, Inspilot:3095'), { main: 3094, inspilot: 3095 });
+});
+
+test('parseBotPortMap: rejects malformed mappings', () => {
+  assert.throws(() => parseBotPortMap('main'), /expected <bot>:<port>/);
+  assert.throws(() => parseBotPortMap('main:'), /expected <bot>:<port>/);
+  assert.throws(() => parseBotPortMap(':3094'), /expected <bot>:<port>/);
+  assert.throws(() => parseBotPortMap('main:abc'), /port must be an integer/);
+  assert.throws(() => parseBotPortMap('main:70000'), /out of range/);
+  assert.throws(() => parseBotPortMap('main:3094,,inspilot:3095'), /empty entry/);
+  assert.throws(() => parseBotPortMap('main:3094,main:3095'), /duplicate bot/);
+});
+
+test('assertBotPortConsistency: skips everything when no map is configured', () => {
+  assert.doesNotThrow(() => assertBotPortConsistency('anything', 'http://127.0.0.1:9999/telegram/inbound', undefined));
+});
+
+test('assertBotPortConsistency: unknown bot is an error', () => {
+  assert.throws(
+    () => assertBotPortConsistency('inspilot', 'http://127.0.0.1:3095/telegram/inbound', { main: 3094 }),
+    /is not listed in PI_TELEGRAM_BOT_PORTS \(known bots: main\)/
+  );
+});
+
+test('assertBotPortConsistency: bot/port mismatch is an error', () => {
+  assert.throws(
+    () => assertBotPortConsistency('inspilot', 'http://127.0.0.1:3094/telegram/inbound', { main: 3094, inspilot: 3095 }),
+    /Bot\/port mismatch: PI_TELEGRAM_BOT="inspilot" must post to port 3095/
+  );
+  assert.doesNotThrow(() =>
+    assertBotPortConsistency('inspilot', 'http://127.0.0.1:3095/telegram/inbound', { main: 3094, inspilot: 3095 })
+  );
+});
+
+test('assertBotPortConsistency: missing port in URL falls back to the scheme default', () => {
+  assert.throws(
+    () => assertBotPortConsistency('main', 'http://127.0.0.1/telegram/inbound', { main: 3094 }),
+    /points at port 80/
+  );
+});
+
+test('verifyNotificationConfig: passes for a consistent configuration', async () => {
+  await withEnv({ PI_TELEGRAM_BOT: 'main' }, () => {
+    const summary = verifyNotificationConfig({
+      webhookOverride: { webhookUrl, webhookToken: 't', notifyTo: '5971350987', bot: 'main' },
+      piOverride: {
+        inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
+        inboundToken: 'Abcd#123456',
+        senderId: '5971350987',
+      },
+    });
+    assert.deepEqual(summary, {
+      bot: 'main',
+      notifyTo: '5971350987',
+      webhookUrl,
+      inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
+    });
+  });
+});
+
+test('verifyNotificationConfig: fails when bot and inbound port disagree', async () => {
+  await withEnv({ PI_TELEGRAM_BOT: 'inspilot' }, () => {
+    assert.throws(
+      () =>
+        verifyNotificationConfig({
+          webhookOverride: { webhookUrl, webhookToken: 't', notifyTo: '5971350987', bot: 'inspilot' },
+          piOverride: {
+            inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
+            inboundToken: 'Abcd#123456',
+            senderId: '5971350987',
+          },
+        }),
+      /Bot\/port mismatch/
+    );
   });
 });

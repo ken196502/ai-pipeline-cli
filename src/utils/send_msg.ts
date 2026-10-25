@@ -25,6 +25,90 @@ export interface WebhookSendResult {
 }
 
 /**
+ * Explicit bot → Pi inbound port mapping, parsed from `PI_TELEGRAM_BOT_PORTS`
+ * (e.g. `main:3094,inspilot:3095`). Used to catch a bot whose alerts would be
+ * injected into the wrong Pi session. When the variable is unset the check is
+ * skipped entirely — the mapping is never guessed.
+ */
+export type BotPortMap = Record<string, number>;
+
+/** Parses `PI_TELEGRAM_BOT_PORTS`; returns undefined when unset or blank. */
+export function parseBotPortMap(raw: string | undefined): BotPortMap | undefined {
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+
+  const map: BotPortMap = {};
+  for (const entry of trimmed.split(',')) {
+    const item = entry.trim();
+    if (!item) {
+      throw new Error(`Invalid PI_TELEGRAM_BOT_PORTS: empty entry in "${trimmed}"`);
+    }
+    const sep = item.indexOf(':');
+    if (sep <= 0 || sep === item.length - 1) {
+      throw new Error(`Invalid PI_TELEGRAM_BOT_PORTS entry "${item}"; expected <bot>:<port>`);
+    }
+    const name = item.slice(0, sep).trim().toLowerCase();
+    const portText = item.slice(sep + 1).trim();
+    if (!name) {
+      throw new Error(`Invalid PI_TELEGRAM_BOT_PORTS entry "${item}"; bot name is required`);
+    }
+    if (!/^\d+$/.test(portText)) {
+      throw new Error(`Invalid PI_TELEGRAM_BOT_PORTS entry "${item}"; port must be an integer`);
+    }
+    const port = Number(portText);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error(`Invalid PI_TELEGRAM_BOT_PORTS entry "${item}"; port out of range 1-65535`);
+    }
+    if (map[name] !== undefined) {
+      throw new Error(`Invalid PI_TELEGRAM_BOT_PORTS: duplicate bot "${name}"`);
+    }
+    map[name] = port;
+  }
+  return map;
+}
+
+/** Reads `PI_TELEGRAM_BOT_PORTS` from the environment (after loading .env). */
+export function getBotPortMap(): BotPortMap | undefined {
+  loadEnvFile();
+  return parseBotPortMap(process.env.PI_TELEGRAM_BOT_PORTS);
+}
+
+/**
+ * Fails when `bot` is unknown to the mapping, or when `inboundUrl` does not
+ * point at the port declared for that bot. No-op when no mapping is configured.
+ */
+export function assertBotPortConsistency(
+  bot: string,
+  inboundUrl: string,
+  map: BotPortMap | undefined
+): void {
+  if (!map) return;
+
+  const name = bot.trim().toLowerCase();
+  const expected = map[name];
+  if (expected === undefined) {
+    throw new Error(
+      `PI_TELEGRAM_BOT="${bot}" is not listed in PI_TELEGRAM_BOT_PORTS (known bots: ${Object.keys(map).join(', ')})`
+    );
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(inboundUrl);
+  } catch {
+    throw new Error(`PI_INBOUND_URL is not a valid URL: ${inboundUrl}`);
+  }
+  const actualPort = parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80;
+  if (actualPort !== expected) {
+    throw new Error(
+      `Bot/port mismatch: PI_TELEGRAM_BOT="${bot}" must post to port ${expected}, ` +
+        `but PI_INBOUND_URL points at port ${actualPort} (${inboundUrl})`
+    );
+  }
+}
+
+/**
  * Optional file attachment delivered via the webhook service.
  * The gateway forwards `filePath` as a Telegram document with the message
  * text as its caption.
@@ -66,6 +150,15 @@ export function getWebhookConfig(override?: Partial<WebhookConfig>): WebhookConf
     );
   }
 
+  // When an explicit bot→port map is configured, an unknown bot is a typo, not a guess.
+  const botPorts = parseBotPortMap(process.env.PI_TELEGRAM_BOT_PORTS);
+  if (botPorts && botPorts[bot.trim().toLowerCase()] === undefined) {
+    throw new Error(
+      `PI_TELEGRAM_BOT="${bot.trim()}" is not listed in PI_TELEGRAM_BOT_PORTS ` +
+        `(known bots: ${Object.keys(botPorts).join(', ')})`
+    );
+  }
+
   return {
     webhookUrl: webhookUrl.trim(),
     webhookToken: webhookToken.trim(),
@@ -73,7 +166,6 @@ export function getWebhookConfig(override?: Partial<WebhookConfig>): WebhookConf
     bot: bot.trim(),
   };
 }
-
 /**
  * True when the process runs inside a test runner. Real external alerts
  * (Telegram webhook / Pi inbound) must never fire from tests — a test that
@@ -185,6 +277,13 @@ export function getPiInboundConfig(override?: Partial<PiInboundConfig>): PiInbou
     throw new Error('Missing required environment variable: PI_INBOUND_URL must be defined');
   }
 
+  // Bot and inbound port must agree, otherwise alerts land in the wrong Pi session.
+  const botPorts = parseBotPortMap(process.env.PI_TELEGRAM_BOT_PORTS);
+  const configuredBot = process.env.PI_TELEGRAM_BOT;
+  if (botPorts && configuredBot && configuredBot.trim()) {
+    assertBotPortConsistency(configuredBot, inboundUrl.trim(), botPorts);
+  }
+
   const inboundToken = override?.inboundToken ?? process.env.PI_TELEGRAM_INBOUND_TOKEN;
   if (!inboundToken || !inboundToken.trim()) {
     throw new Error('Missing required environment variable: PI_TELEGRAM_INBOUND_TOKEN must be defined');
@@ -205,6 +304,38 @@ export function getPiInboundConfig(override?: Partial<PiInboundConfig>): PiInbou
     inboundToken: inboundToken.trim(),
     senderId: senderId.trim(),
     chatId: chatId.trim(),
+  };
+}
+
+export interface NotificationConfigSummary {
+  bot: string;
+  notifyTo: string;
+  webhookUrl: string;
+  inboundUrl: string;
+}
+
+/**
+ * Startup self-check for the notification channels.
+ *
+ * Resolves both channels and (when `PI_TELEGRAM_BOT_PORTS` is configured)
+ * verifies the bot name is known and that its Pi inbound port matches the
+ * mapping. Throws with an actionable message instead of letting a pipeline run
+ * for an hour and then lose every alert.
+ */
+export function verifyNotificationConfig(options?: {
+  webhookOverride?: Partial<WebhookConfig>;
+  piOverride?: Partial<PiInboundConfig>;
+}): NotificationConfigSummary {
+  const webhook = getWebhookConfig(options?.webhookOverride);
+  const inbound = getPiInboundConfig(options?.piOverride);
+
+  assertBotPortConsistency(webhook.bot, inbound.inboundUrl, getBotPortMap());
+
+  return {
+    bot: webhook.bot,
+    notifyTo: webhook.notifyTo,
+    webhookUrl: webhook.webhookUrl,
+    inboundUrl: inbound.inboundUrl,
   };
 }
 
