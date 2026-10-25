@@ -53,3 +53,24 @@ AIGC-pipeline 跑完 / 失败后，Telegram 收不到任何消息。tmux `xhot-p
 
 - 不在 gateway 端加"默认 bot"兜底（会掩盖配置错误）。
 - 不改 pi inbound payload 的 `bot` 字段（避免 bot 名与 inbound 端口错配导致静默丢弃）。
+
+## 追加：去掉所有"不清不楚"的 fallback（2026-10-24）
+
+多 bot 网关下，bot 名只能来自 env；缺失即报错，不做任何猜测。
+
+`src/utils/send_msg.ts`：
+
+| 变量 | 变更前 | 变更后 |
+|---|---|---|
+| `PI_TELEGRAM_BOT` | 可选，回落 `TELEGRAM_BOT`，空则不发 bot 字段 | **必填**，只认 `PI_TELEGRAM_BOT`；空白/缺失 → `sendMsg` 直接抛错，不发请求 |
+| `NOTIFY_TO` | 可回落 `TELEGRAM_TO` | **必填**，只认 `NOTIFY_TO` |
+| `PI_INBOUND_URL` | 回落 `TELEGRAM_INBOUND_URL`，再回落硬编码 `127.0.0.1:3094` | **必填**，无默认值 |
+| `PI_TELEGRAM_INBOUND_TOKEN` | 回落 `INBOUND_WEBHOOK_TOKEN` / `PI_INBOUND_TOKEN`，再回落硬编码 `Abcd#123456` | **必填**，只认 `PI_TELEGRAM_INBOUND_TOKEN` |
+| inbound sender/chat | 回落 `TELEGRAM_TO` / 硬编码 `5971350987` | 必填 `NOTIFY_TO` |
+| `sendToPi` 失败 | `return false` 静默吞掉 | 抛错（由 `notifyError` 记录），HTTP 非 2xx 也算失败 |
+
+测试 `tests/telegram-bot-routing.test.ts` 扩到 9 条，覆盖：缺失/空白 bot 直接报错且不发请求、
+`TELEGRAM_BOT` 别名不被接受、inbound URL/token 缺失报错、别名 token 不被接受。
+
+已知边界：`loadEnvFile()` 仅在变量未设置时写入，因此在 pi 会话 shell 里运行会继承该会话的
+`PI_TELEGRAM_BOT`。要固定 bot，请用干净 shell 或同时显式导出 bot 与 `PI_INBOUND_URL`。

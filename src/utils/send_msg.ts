@@ -10,11 +10,11 @@ export interface WebhookConfig {
   webhookToken: string;
   notifyTo: string;
   /**
-   * Bot name for multi-bot gateways (pi-telegram-server `TELEGRAM_BOTS`).
-   * When the gateway serves more than one bot it rejects requests without it.
-   * Resolved from PI_TELEGRAM_BOT / TELEGRAM_BOT; never guessed.
+   * Bot name for the multi-bot gateway (pi-telegram-server `TELEGRAM_BOTS`).
+   * The gateway refuses requests without it, so it is required here as well:
+   * it comes from `PI_TELEGRAM_BOT` only — no alias, no default, no guessing.
    */
-  bot?: string;
+  bot: string;
 }
 
 export interface WebhookSendResult {
@@ -53,19 +53,24 @@ export function getWebhookConfig(override?: Partial<WebhookConfig>): WebhookConf
     throw new Error('Missing required environment variable: WEBHOOK_TOKEN must be defined');
   }
 
-  const notifyTo = override?.notifyTo ?? process.env.NOTIFY_TO ?? process.env.TELEGRAM_TO;
+  const notifyTo = override?.notifyTo ?? process.env.NOTIFY_TO;
   if (!notifyTo || !notifyTo.trim()) {
-    throw new Error('Missing required environment variable: NOTIFY_TO (or TELEGRAM_TO) must be defined');
+    throw new Error('Missing required environment variable: NOTIFY_TO must be defined');
   }
 
-  const rawBot = override?.bot ?? process.env.PI_TELEGRAM_BOT ?? process.env.TELEGRAM_BOT;
-  const bot = rawBot && rawBot.trim() ? rawBot.trim() : undefined;
+  const bot = override?.bot ?? process.env.PI_TELEGRAM_BOT;
+  if (!bot || !bot.trim()) {
+    throw new Error(
+      'Missing required environment variable: PI_TELEGRAM_BOT must be defined ' +
+        '(the webhook gateway runs multiple bots and rejects requests without an explicit bot name)'
+    );
+  }
 
   return {
     webhookUrl: webhookUrl.trim(),
     webhookToken: webhookToken.trim(),
     notifyTo: notifyTo.trim(),
-    ...(bot ? { bot } : {}),
+    bot: bot.trim(),
   };
 }
 
@@ -109,8 +114,7 @@ export async function sendMsg(
     throw new Error('[send_msg] attachment.filePath must be a non-empty string');
   }
 
-  const body: Record<string, string> = { to: config.notifyTo, message };
-  if (config.bot) body.bot = config.bot;
+  const body: Record<string, string> = { to: config.notifyTo, message, bot: config.bot };
   if (attachment) {
     body.filePath = attachment.filePath.trim();
     if (attachment.fileName?.trim()) body.fileName = attachment.fileName.trim();
@@ -138,7 +142,7 @@ export async function sendMsg(
   if (!res.ok) {
     const hint =
       res.status === 400 && /multiple bots configured/i.test(bodyText)
-        ? ' (gateway runs multiple bots: set PI_TELEGRAM_BOT=<name> in the environment)'
+        ? ` (gateway does not know bot "${config.bot}": check PI_TELEGRAM_BOT against TELEGRAM_BOTS)`
         : '';
     throw new Error(
       `[send_msg] Webhook responded with error HTTP ${res.status}: ${bodyText || res.statusText}${hint}`
@@ -163,37 +167,38 @@ export async function sendMsg(
 export interface PiInboundConfig {
   inboundUrl: string;
   inboundToken: string;
-  senderId?: string;
-  chatId?: string;
+  senderId: string;
+  chatId: string;
 }
 
 /**
  * Resolves configuration for forwarding messages to the running Pi instance.
- * Defaults to the local telegram inbound listener: http://127.0.0.1:3094/telegram/inbound
+ * Every field must be configured explicitly — there is no default host, port,
+ * token or chat id, because a wrong guess silently routes alerts to the wrong
+ * bot/session instead of failing.
  */
 export function getPiInboundConfig(override?: Partial<PiInboundConfig>): PiInboundConfig {
   loadEnvFile();
 
-  const inboundUrl =
-    override?.inboundUrl ??
-    process.env.PI_INBOUND_URL ??
-    process.env.TELEGRAM_INBOUND_URL ??
-    'http://127.0.0.1:3094/telegram/inbound';
+  const inboundUrl = override?.inboundUrl ?? process.env.PI_INBOUND_URL;
+  if (!inboundUrl || !inboundUrl.trim()) {
+    throw new Error('Missing required environment variable: PI_INBOUND_URL must be defined');
+  }
 
-  const inboundToken =
-    override?.inboundToken ??
-    process.env.PI_INBOUND_TOKEN ??
-    process.env.INBOUND_WEBHOOK_TOKEN ??
-    process.env.PI_TELEGRAM_INBOUND_TOKEN ??
-    'Abcd#123456';
+  const inboundToken = override?.inboundToken ?? process.env.PI_TELEGRAM_INBOUND_TOKEN;
+  if (!inboundToken || !inboundToken.trim()) {
+    throw new Error('Missing required environment variable: PI_TELEGRAM_INBOUND_TOKEN must be defined');
+  }
 
-  const senderId =
-    override?.senderId ??
-    process.env.NOTIFY_TO ??
-    process.env.TELEGRAM_TO ??
-    '5971350987';
+  const senderId = override?.senderId ?? process.env.NOTIFY_TO;
+  if (!senderId || !senderId.trim()) {
+    throw new Error('Missing required environment variable: NOTIFY_TO must be defined');
+  }
 
   const chatId = override?.chatId ?? senderId;
+  if (!chatId || !chatId.trim()) {
+    throw new Error('Missing required environment variable: chatId must be defined');
+  }
 
   return {
     inboundUrl: inboundUrl.trim(),
@@ -216,33 +221,32 @@ export async function sendToPi(
     return true;
   }
   const config = getPiInboundConfig(overrideConfig);
-  if (!config.inboundUrl || !config.inboundToken) {
-    return false;
+
+  const payload = {
+    body: message,
+    senderId: config.senderId,
+    chatId: config.chatId,
+    timestamp: Math.floor(Date.now() / 1000),
+  };
+
+  const res = await fetch(config.inboundUrl, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${config.inboundToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(5000),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(
+      `[sendToPi] Pi inbound rejected the message HTTP ${res.status} (${config.inboundUrl}): ${text || res.statusText}`
+    );
   }
 
-  try {
-    const payload = {
-      body: message,
-      senderId: config.senderId,
-      chatId: config.chatId,
-      timestamp: Math.floor(Date.now() / 1000),
-    };
-
-    const res = await fetch(config.inboundUrl, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${config.inboundToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(5000),
-    });
-
-    return res.ok;
-  } catch (err: any) {
-    console.error(pc.dim(`[sendToPi] Notice: Could not deliver message to Pi inbound (${config.inboundUrl}): ${err.message}`));
-    return false;
-  }
+  return true;
 }
 
 /**

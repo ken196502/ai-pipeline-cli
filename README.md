@@ -94,15 +94,14 @@ IMAGE_MODEL=sensenova-u1.5-fast
 X_USERNAME=your_x_username
 X_PWD=your_x_password
 
-# 消息通知
+# 消息通知（全部必填，缺失直接抛错，无默认值/无别名）
 WEBHOOK_URL=http://...
 WEBHOOK_TOKEN=...
 NOTIFY_TO=...
-# 当 webhook 网关为多 bot 模式（pi-telegram-server 的 TELEGRAM_BOTS）时必须指定，
-# 否则网关返回 HTTP 400 "multiple bots configured"，所有通知都会丢失
-# 注意：process.env 优先级高于 .env，在 pi 会话 shell 里跑会自动继承该会话的 bot
+# 网关为多 bot 模式（pi-telegram-server 的 TELEGRAM_BOTS）时必须指定 bot 名；
+# 只认 PI_TELEGRAM_BOT（不读 TELEGRAM_BOT），未设置则发送前直接报错
 PI_TELEGRAM_BOT=main
-# Pi inbound 端点与令牌（显式写明，避免与 bot 对应的 pi 端口错配）
+# Pi inbound 端点与令牌：不写就报错，代码里没有 127.0.0.1:3094 / Abcd#123456 之类的默认值
 PI_INBOUND_URL=http://127.0.0.1:3094/telegram/inbound
 PI_TELEGRAM_INBOUND_TOKEN=...
 ```

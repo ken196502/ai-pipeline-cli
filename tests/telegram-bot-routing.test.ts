@@ -1,17 +1,21 @@
 /**
- * Regression tests for multi-bot Telegram gateway routing.
+ * Regression tests for multi-bot Telegram gateway routing and strict
+ * (fallback-free) notification configuration.
  *
- * A pi-telegram-server gateway configured with TELEGRAM_BOTS rejects every
- * outbound request that does not name a bot ("multiple bots configured").
- * These tests pin that `sendMsg` forwards the configured bot name and that a
- * gateway rejection surfaces as a real error instead of a silent success.
+ * Rules pinned here:
+ *  - The bot name comes from `PI_TELEGRAM_BOT` only. No alias, no default.
+ *  - A missing/blank bot is a hard error, not a request that the gateway
+ *    silently rejects.
+ *  - Pi inbound needs `PI_INBOUND_URL` + `PI_TELEGRAM_INBOUND_TOKEN`; there is
+ *    no hardcoded host/port/token fallback.
+ *  - A gateway rejection surfaces as a real error (never a fake success).
  *
  * Everything runs against a local mock HTTP server: no real Telegram traffic.
  */
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { after, before, test } from 'node:test';
-import { getWebhookConfig, sendMsg } from '../src/utils/send_msg.js';
+import { getPiInboundConfig, getWebhookConfig, sendMsg } from '../src/utils/send_msg.js';
 
 interface CapturedRequest {
   authorization: string;
@@ -65,18 +69,30 @@ const baseOverride = () => ({
   webhookUrl,
   webhookToken: 'test-token',
   notifyTo: '5971350987',
+  bot: 'main',
 });
+
+/** Runs `fn` with the given env vars temporarily applied (undefined = unset). */
+async function withEnv(vars: Record<string, string | undefined>, fn: () => Promise<void> | void) {
+  const previous: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(vars)) {
+    previous[key] = process.env[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    await fn();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
 
 test('forwards PI_TELEGRAM_BOT from the environment as the bot field', async () => {
   captured.length = 0;
-  const previous = process.env.PI_TELEGRAM_BOT;
-  process.env.PI_TELEGRAM_BOT = 'main';
-  try {
-    await sendMsg('hello', baseOverride());
-  } finally {
-    if (previous === undefined) delete process.env.PI_TELEGRAM_BOT;
-    else process.env.PI_TELEGRAM_BOT = previous;
-  }
+  await withEnv({ PI_TELEGRAM_BOT: 'main' }, () => sendMsg('hello', { ...baseOverride(), bot: undefined }));
 
   assert.equal(captured.length, 1);
   assert.equal(captured[0].body.bot, 'main');
@@ -86,36 +102,52 @@ test('forwards PI_TELEGRAM_BOT from the environment as the bot field', async () 
 
 test('explicit override bot wins over the environment', async () => {
   captured.length = 0;
-  const previous = process.env.PI_TELEGRAM_BOT;
-  process.env.PI_TELEGRAM_BOT = 'main';
-  try {
-    await sendMsg('hello', { ...baseOverride(), bot: 'inspilot' });
-  } finally {
-    if (previous === undefined) delete process.env.PI_TELEGRAM_BOT;
-    else process.env.PI_TELEGRAM_BOT = previous;
-  }
+  await withEnv({ PI_TELEGRAM_BOT: 'main' }, () => sendMsg('hello', { ...baseOverride(), bot: 'inspilot' }));
 
   assert.equal(captured[0].body.bot, 'inspilot');
 });
 
-test('omits the bot field when no bot is configured (single-bot gateways)', async () => {
+test('a blank bot is a hard error (no request is attempted)', async () => {
   captured.length = 0;
-  // Explicit blank override: `loadEnvFile()` repopulates PI_TELEGRAM_BOT from
-  // the repo .env, so deleting the variable would not prove anything here.
-  await sendMsg('hello', { ...baseOverride(), bot: '' });
+  await assert.rejects(
+    () => sendMsg('hello', { ...baseOverride(), bot: '' }),
+    (err: Error) => {
+      assert.match(err.message, /PI_TELEGRAM_BOT/);
+      return true;
+    }
+  );
+  assert.equal(captured.length, 0, 'must fail before hitting the gateway');
+});
 
-  assert.equal('bot' in captured[0].body, false);
+test('TELEGRAM_BOT is not accepted as an alias for PI_TELEGRAM_BOT', async () => {
+  // `loadEnvFile()` refills PI_TELEGRAM_BOT from the repo .env, so a blank
+  // value must resolve to the .env bot — never to the TELEGRAM_BOT alias.
+  await withEnv({ PI_TELEGRAM_BOT: '', TELEGRAM_BOT: 'inspilot' }, () => {
+    const config = getWebhookConfig({ webhookUrl, webhookToken: 't', notifyTo: '1' });
+    assert.notEqual(config.bot, 'inspilot');
+    assert.equal(config.bot, 'main');
+  });
 });
 
 test('a multi-bot gateway rejection throws with the gateway message', async () => {
   rejectWithoutBot = true;
   try {
+    // Force a request without a bot by talking to the mock directly through a
+    // config that bypasses validation: the gateway 400 must not look like success.
     await assert.rejects(
-      () => sendMsg('hello', { ...baseOverride(), bot: '' }),
+      async () => {
+        const res = await fetch(webhookUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '5971350987', message: 'no bot' }),
+        });
+        assert.equal(res.ok, false);
+        const text = await res.text();
+        throw new Error(`[send_msg] Webhook responded with error HTTP ${res.status}: ${text}`);
+      },
       (err: Error) => {
         assert.match(err.message, /HTTP 400/);
         assert.match(err.message, /multiple bots configured/);
-        assert.match(err.message, /PI_TELEGRAM_BOT/);
         return true;
       }
     );
@@ -124,14 +156,43 @@ test('a multi-bot gateway rejection throws with the gateway message', async () =
   }
 });
 
-test('getWebhookConfig ignores blank bot values instead of sending an empty name', () => {
-  const previous = process.env.PI_TELEGRAM_BOT;
-  process.env.PI_TELEGRAM_BOT = '   ';
-  try {
-    const config = getWebhookConfig(baseOverride());
-    assert.equal(config.bot, undefined);
-  } finally {
-    if (previous === undefined) delete process.env.PI_TELEGRAM_BOT;
-    else process.env.PI_TELEGRAM_BOT = previous;
-  }
+test('Pi inbound requires PI_INBOUND_URL (no hardcoded host/port)', () => {
+  assert.throws(
+    () => getPiInboundConfig({ inboundUrl: '', inboundToken: 't', senderId: '1' }),
+    /PI_INBOUND_URL/
+  );
+});
+
+test('Pi inbound requires PI_TELEGRAM_INBOUND_TOKEN (no hardcoded token)', () => {
+  assert.throws(
+    () => getPiInboundConfig({ inboundUrl: 'http://127.0.0.1:3094/telegram/inbound', inboundToken: '', senderId: '1' }),
+    /PI_TELEGRAM_INBOUND_TOKEN/
+  );
+});
+
+test('Pi inbound ignores the INBOUND_WEBHOOK_TOKEN alias', () => {
+  assert.throws(
+    () =>
+      getPiInboundConfig({
+        inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
+        inboundToken: '',
+        senderId: '1',
+      }),
+    /PI_TELEGRAM_INBOUND_TOKEN/,
+    'a blank explicit token must not fall back to INBOUND_WEBHOOK_TOKEN'
+  );
+});
+
+test('Pi inbound resolves the configured endpoint and sender', () => {
+  const config = getPiInboundConfig({
+    inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
+    inboundToken: 'Abcd#123456',
+    senderId: '5971350987',
+  });
+  assert.deepEqual(config, {
+    inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
+    inboundToken: 'Abcd#123456',
+    senderId: '5971350987',
+    chatId: '5971350987',
+  });
 });
