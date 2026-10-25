@@ -104,6 +104,9 @@ PI_TELEGRAM_BOT=main
 # Pi inbound 端点与令牌：不写就报错，代码里没有 127.0.0.1:3094 / Abcd#123456 之类的默认值
 PI_INBOUND_URL=http://127.0.0.1:3094/telegram/inbound
 PI_TELEGRAM_INBOUND_TOKEN=...
+# bot → Pi inbound 端口显式映射：启动期自检用，bot 不在表里或端口对不上直接报错；
+# 不写则跳过检查（不会猜端口）
+PI_TELEGRAM_BOT_PORTS=main:3094,inspilot:3095
 ```
 
 ---
