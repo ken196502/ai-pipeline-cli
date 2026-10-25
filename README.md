@@ -100,7 +100,11 @@ WEBHOOK_TOKEN=...
 NOTIFY_TO=...
 # 当 webhook 网关为多 bot 模式（pi-telegram-server 的 TELEGRAM_BOTS）时必须指定，
 # 否则网关返回 HTTP 400 "multiple bots configured"，所有通知都会丢失
+# 注意：process.env 优先级高于 .env，在 pi 会话 shell 里跑会自动继承该会话的 bot
 PI_TELEGRAM_BOT=main
+# Pi inbound 端点与令牌（显式写明，避免与 bot 对应的 pi 端口错配）
+PI_INBOUND_URL=http://127.0.0.1:3094/telegram/inbound
+PI_TELEGRAM_INBOUND_TOKEN=...
 ```
 
 ---
