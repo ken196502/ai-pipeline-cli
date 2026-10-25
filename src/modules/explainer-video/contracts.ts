@@ -78,6 +78,10 @@ export interface ExplainerProduceOptions {
   preset?: string;
   /** Skip frame rendering (HTML preview + narration only). */
   previewOnly?: boolean;
+  /** Custom video output filename (defaults to 'explainer-video.mp4'). */
+  videoFilename?: string;
+  /** Custom grid preview filename (defaults to 'explainer-grid.jpg'). */
+  gridFilename?: string;
   /**
    * Filename of the JSON result file written to outDir (e.g. 'explainer-result.json').
    * Omit to skip writing a result file.

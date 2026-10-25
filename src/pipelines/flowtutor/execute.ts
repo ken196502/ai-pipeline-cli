@@ -89,6 +89,8 @@ export async function executeFlowTutorVideo(
   const profileDir = resolveProfileDir(options.profileDir);
   await ctx.run.configure({
     ...options, profileDir,
+    scriptClipCount: options.maxClips,
+    maxClips: options.maxClips,
     evaluationFocus: options.evaluationFocus || DEFAULT_FLOW_TUTOR_EVALUATION_FOCUS,
     evaluationRequirements: options.evaluationRequirements || FLOW_TUTOR_EVALUATION_REQUIREMENTS,
     skipMediaDownload: false,

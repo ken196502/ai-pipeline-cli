@@ -62,8 +62,12 @@ export async function runTutorialVisualQa(
   const samplesPerScene = params.samplesPerScene ?? 4;
   await fs.mkdir(shotsDir, { recursive: true });
 
+  const timelinePath = (await fs.stat(path.join(tutorialDir, 'tutorial.json')).catch(() => null))
+    ? path.join(tutorialDir, 'tutorial.json')
+    : path.join(tutorialDir, 'explainer.json');
+
   const timeline = JSON.parse(
-    await fs.readFile(path.join(tutorialDir, 'tutorial.json'), 'utf-8')
+    await fs.readFile(timelinePath, 'utf-8')
   ) as TutorialTimeline;
 
   const server = await serveTutorialDir(tutorialDir);

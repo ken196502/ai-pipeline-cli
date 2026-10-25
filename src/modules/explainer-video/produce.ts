@@ -78,6 +78,23 @@ export async function produceExplainerVideo(
   await fs.mkdir(explainerDir, { recursive: true });
   await fs.mkdir(assetsOutDir, { recursive: true });
 
+  // Guarantee that all material assets exist inside explainerDir/assets
+  for (const asset of assets) {
+    if (asset.sourcePath && asset.src) {
+      const destPath = path.join(explainerDir, asset.src);
+      try {
+        const destExists = await fs.stat(destPath).then(() => true).catch(() => false);
+        const srcExists = await fs.stat(asset.sourcePath).then(() => true).catch(() => false);
+        if (!destExists && srcExists) {
+          await fs.mkdir(path.dirname(destPath), { recursive: true });
+          await fs.copyFile(asset.sourcePath, destPath);
+        }
+      } catch {
+        // ignore copy errors for optional assets
+      }
+    }
+  }
+
   if (options.storyboardFilename) {
     await fs.writeFile(
       path.join(outDir, options.storyboardFilename),
@@ -153,7 +170,8 @@ export async function produceExplainerVideo(
   progress('player', `Host render script ready: ${path.basename(hostScript.scriptPath)}`);
 
   // 4. Headless frame-by-frame render + narration mux
-  const videoPath = path.join(explainerDir, EXPLAINER_DEFAULTS.videoFilename);
+  const videoFilename = options.videoFilename ?? EXPLAINER_DEFAULTS.videoFilename;
+  const videoPath = path.join(explainerDir, videoFilename);
   let framesRendered = 0;
   if (!options.previewOnly) {
     progress(
@@ -178,6 +196,12 @@ export async function produceExplainerVideo(
     });
     framesRendered = renderResult.framesRendered;
     progress('render', `Video ready: ${path.basename(videoPath)}`);
+
+    // Ensure compatibility if caller used custom filename (e.g. tutorial-video.mp4)
+    if (videoFilename !== EXPLAINER_DEFAULTS.videoFilename) {
+      const aliasPath = path.join(explainerDir, EXPLAINER_DEFAULTS.videoFilename);
+      await fs.copyFile(videoPath, aliasPath).catch(() => undefined);
+    }
   } else {
     progress('preview', 'HTML preview and narration ready; video rendering skipped (previewOnly)');
   }
@@ -193,7 +217,8 @@ export async function produceExplainerVideo(
     try {
       progress('grid', 'Building contact-sheet grid of the final video (grid preview for the report)');
       const gridOpts = options.gridOptions?.(voiceTrack);
-      gridPath = path.join(explainerDir, EXPLAINER_DEFAULTS.gridFilename);
+      const gridFilename = options.gridFilename ?? EXPLAINER_DEFAULTS.gridFilename;
+      gridPath = path.join(explainerDir, gridFilename);
       await createExplainerGrid({
         videoPath,
         outPath: gridPath,

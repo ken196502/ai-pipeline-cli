@@ -152,7 +152,7 @@ export async function createTutorialVideo(
   const width = params.width ?? DEFAULTS.width;
   const height = params.height ?? DEFAULTS.height;
   const maxScenes = params.maxScenes ?? DEFAULTS.maxScenes;
-  const voice = params.ttsVoice || 'local-clone';
+  const voice = params.ttsVoice || 'Ryan';
   const rate = params.ttsRate ?? '+0%';
 
   const tutorialDir = path.join(params.outDir, TUTORIAL_DIRNAME);
@@ -345,6 +345,10 @@ export async function createTutorialVideo(
   let lastRenderLogged = 0;
   const summary = await produceExplainerVideo({
     outDir: params.outDir,
+    explainerDirname: TUTORIAL_DIRNAME,
+    tutorialDirname: TUTORIAL_DIRNAME,
+    videoFilename: TUTORIAL_VIDEO_FILENAME,
+    gridFilename: 'tutorial-grid.jpg',
     runId: params.runId,
     topic: params.topic,
     title: params.title,
@@ -364,11 +368,12 @@ export async function createTutorialVideo(
     preset: params.preset ?? DEFAULTS.preset,
     previewOnly: params.previewOnly,
     summaryExtras: { model: storyboardResult.model, storyboardPath },
-    afterRender: async () => {
+    afterRender: async ({ explainerDir }) => {
       // Self-check: programmatic visual QA (canvas pixel variance + JS boot)
       progress('qa', 'Running automated visual QA (canvas frame checks)');
+      const targetDir = explainerDir || tutorialDir;
       const qa = await runTutorialVisualQa({
-        tutorialDir,
+        tutorialDir: targetDir,
         engine,
         browserPath: engine === 'chromium' ? params.browserPath : undefined,
         samplesPerScene: 4,
@@ -379,7 +384,7 @@ export async function createTutorialVideo(
             qa.issues.map((issue) => `- [${issue.kind}] ${issue.detail} (t=${issue.tSec.toFixed(2)}s)`).join('\n')
         );
       }
-      progress('qa', `Visual QA passed (${qa.checksRun} frames checked, screenshots in ${path.relative(params.outDir, path.join(tutorialDir, 'qa'))}/)`);
+      progress('qa', `Visual QA passed (${qa.checksRun} frames checked, screenshots in ${path.relative(params.outDir, path.join(targetDir, 'qa'))}/)`);
     },
     gridOptions: (voiceTrack) => {
       // Detect final showcase range so the contact-sheet grid preview reliably

@@ -18,6 +18,7 @@ const settingsSchema = z.object({
   clipDuration: z.union([z.literal(4), z.literal(6), z.literal(8), z.literal(10)]).optional(),
   aspectRatio: z.enum(['landscape', 'portrait']).optional(),
   scriptModel: z.string().optional(), flowModel: z.string().optional(), useLlmForScript: z.boolean().optional(),
+  scriptClipCount: z.number().int().positive().optional(), maxClips: z.number().int().positive().optional(),
   minFrames: z.number().optional(), maxFrames: z.number().optional(), sceneThreshold: z.number().optional(),
   metricThresholds: z.object({ minDurationSec: z.number().optional(), maxAgeDays: z.number().optional() }).optional(),
 });

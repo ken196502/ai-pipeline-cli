@@ -47,3 +47,11 @@ puter_token.json
 .puter/
 *.asr.json
 
+# Local flow credentials and run caches
+.flow-cli/
+storage/
+cookies.txt
+scripts/
+
+
+

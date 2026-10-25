@@ -69,7 +69,7 @@ async function executeSingleQwen3TtsAttempt(
   loadEnvFile();
   const baseUrl = resolveQwen3TtsUrl(options.url);
   const timeoutMs = options.timeoutMs ?? 180_000;
-  const speaker = options.speaker || 'Ryan';
+  const speaker = !options.speaker || options.speaker === 'local-clone' ? 'Ryan' : options.speaker;
   const language = options.language || 'Auto';
   const modelSize = options.modelSize || '1.7B';
   const hfToken = options.token !== undefined ? (options.token ? options.token : undefined) : process.env.HF_TOKEN;
@@ -476,9 +476,10 @@ export async function synthesizeNarrationSegment(
       url: options.ttsUrl,
     });
   } else {
+    const speaker = !options.voice || options.voice === 'local-clone' ? 'Ryan' : options.voice;
     synthResult = await synthesizeQwen3Tts(request.text, {
       url: options.ttsUrl,
-      speaker: options.voice,
+      speaker,
     });
   }
 
@@ -507,7 +508,7 @@ export async function synthesizeNarrationSegment(
   }
 
   const wordsPayload = {
-    voice: options.voice || 'local-clone',
+    voice: options.voice && options.voice !== 'local-clone' ? options.voice : 'Ryan',
     rate: options.rate || '+0%',
     text: request.text,
     durationSec,
@@ -841,7 +842,7 @@ export async function buildOpusVoiceTrack(params: {
   onProgress?: (message: string) => void;
 }): Promise<OpusVoiceTrackResult> {
   const { clips, outAudioDir } = params;
-  const voice = params.voice || 'local-clone';
+  const voice = params.voice && params.voice !== 'local-clone' ? params.voice : 'Ryan';
   const rate = params.rate ?? '+0%';
   const sampleRate = params.sampleRate ?? 44100;
   await fs.mkdir(outAudioDir, { recursive: true });
@@ -890,6 +891,7 @@ export async function buildOpusVoiceTrack(params: {
         const shot = clip.shots[si];
         const shotStart = currentCursor;
         const voiceLines: TutorialVoiceLine[] = [];
+        let finalVideoHandledInShot = false;
 
         for (let li = 0; li < shot.elements.length; li += 1) {
           const lineText = shot.narration[li] || (shot.elements[li][0] as string);
@@ -903,40 +905,47 @@ export async function buildOpusVoiceTrack(params: {
           let lineWords: TutorialWord[] = [];
 
           if (isFinalVideo) {
-            // 成片自带声音，成片展示期间绝不加教程 TTS 旁白覆盖成片！
-            const finalAsset = (params.assets || []).find((a) => a.id === 'final-ai-video');
-            let finalDur = finalAsset?.durationSec && finalAsset.durationSec > 0 ? finalAsset.durationSec : 0;
-            if (!finalDur && finalAsset?.sourcePath) {
-              try {
-                finalDur = await probeDurationSec(finalAsset.sourcePath);
-              } catch {
-                finalDur = 4;
-              }
-            }
-            if (!finalDur) finalDur = 4;
-            aDur = finalDur;
-
-            let audioExtracted = false;
-            if (finalAsset?.sourcePath) {
-              try {
-                const hasAudio = await probeHasAudioStream(finalAsset.sourcePath);
-                if (hasAudio) {
-                  await extractAndResampleAudio({
-                    videoPath: finalAsset.sourcePath,
-                    outAudioPath: segWavPath,
-                    sampleRate,
-                  });
-                  audioExtracted = true;
+            if (finalVideoHandledInShot) {
+              // The final AI video showcase is already active and playing for this shot.
+              // Do NOT duplicate the video duration or audio for secondary lines in the same shot!
+              aDur = 0;
+            } else {
+              finalVideoHandledInShot = true;
+              // 成片自带声音，成片展示期间绝不加教程 TTS 旁白覆盖成片！
+              const finalAsset = (params.assets || []).find((a) => a.id === 'final-ai-video');
+              let finalDur = finalAsset?.durationSec && finalAsset.durationSec > 0 ? finalAsset.durationSec : 0;
+              if (!finalDur && finalAsset?.sourcePath) {
+                try {
+                  finalDur = await probeDurationSec(finalAsset.sourcePath);
+                } catch {
+                  finalDur = 4;
                 }
-              } catch {
-                audioExtracted = false;
               }
-            }
+              if (!finalDur) finalDur = 4;
+              aDur = finalDur;
 
-            if (!audioExtracted) {
-              await makeSilence(finalDur, path.basename(segWavPath));
+              let audioExtracted = false;
+              if (finalAsset?.sourcePath) {
+                try {
+                  const hasAudio = await probeHasAudioStream(finalAsset.sourcePath);
+                  if (hasAudio) {
+                    await extractAndResampleAudio({
+                      videoPath: finalAsset.sourcePath,
+                      outAudioPath: segWavPath,
+                      sampleRate,
+                    });
+                    audioExtracted = true;
+                  }
+                } catch {
+                  audioExtracted = false;
+                }
+              }
+
+              if (!audioExtracted) {
+                await makeSilence(finalDur, path.basename(segWavPath));
+              }
+              audioParts.push(segWavPath);
             }
-            audioParts.push(segWavPath);
           } else {
             const segAudioPath = path.join(workDir, `clip-${ci}-shot-${si}-line-${li}.wav`);
             params.onProgress?.(`Synthesizing narration (local TTS): clip ${ci + 1}/${clips.length}, shot ${si + 1}/${clip.shots.length}, line ${li + 1}/${shot.elements.length}`);
@@ -995,7 +1004,7 @@ export async function buildOpusVoiceTrack(params: {
           });
 
           // Line gap breathing space
-          if (li < shot.elements.length - 1) {
+          if (li < shot.elements.length - 1 && aDur > 0) {
             const lineGap = await makeSilence(OPUS_TIMING.LINE_GAP, `part-${String(partIndex++).padStart(4, '0')}-linegap.wav`);
             audioParts.push(lineGap);
             currentCursor += OPUS_TIMING.LINE_GAP;
