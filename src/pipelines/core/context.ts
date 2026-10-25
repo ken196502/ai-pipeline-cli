@@ -61,7 +61,7 @@ export async function createDefaultExecutionContext(
     runId,
     outDir,
     config: options.config,
-    filenames: ['viral', 'ytbhot', 'research-audit'].includes(pipelineId) ? pipelineArtifactFilenames : undefined,
+    filenames: ['flowTutor', 'research-audit'].includes(pipelineId) ? pipelineArtifactFilenames : undefined,
   });
 
   let pending = Promise.resolve();

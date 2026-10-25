@@ -99,7 +99,7 @@ export async function checkEnvStage(
 
   // 0. Flow Credit Threshold Pre-Check (first step of every run)
   const reservedThreshold = getFlowReservedCredits();
-  const pipelineId = options.pipelineId || 'viral-video-maker';
+  const pipelineId = options.pipelineId || 'flowTutor';
   const storage = getPipelineStorage(pipelineId, options.storageDir);
   const flowCredits = await storage.getFlowCredits();
 

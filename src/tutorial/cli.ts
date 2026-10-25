@@ -28,7 +28,7 @@ import { captureBrowserStepShots, parseBrowserStepScript } from './step-shots.js
 import { captureGeminiShots } from './ui-shots.js';
 import { runTutorialVisualQa } from './qa.js';
 import { exitAfterFlush } from '../utils/shutdown.js';
-import { sendMsg, formatDetailedErrorMessage } from '../utils/send_msg.js';
+import { sendMsg, notifyError, formatDetailedErrorMessage } from '../utils/send_msg.js';
 import type { TutorialClipOutputRef } from './assets.js';
 import { parseViewport } from '../browser/launcher.js';
 import type { TutorialGenerationSummary } from './contracts.js';
@@ -443,7 +443,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
       if (err.stack) console.error(pc.dim(err.stack));
       try {
         const alertMsg = formatDetailedErrorMessage(err, '❌ Tutorial video generation failed');
-        await sendMsg(alertMsg);
+        await notifyError(alertMsg);
       } catch {}
       await exitAfterFlush(1, 'tutorial-video');
     });

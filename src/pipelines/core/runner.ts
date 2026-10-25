@@ -11,13 +11,15 @@ export const DEFAULT_ERROR_COOLDOWN_MS = 60 * 1000; // 60 seconds
  *
  * Example:
  *   parseTopics("AI; new model; deepseek r1 ; ") => ["AI", "new model", "deepseek r1"]
+ *   parseTopics("") => []
  */
-export function parseTopics(input?: string | string[] | null, defaultTopic = 'new model'): string[] {
-  if (!input) return [defaultTopic];
+export function parseTopics(input?: string | string[] | null, defaultTopic?: string): string[] {
+  if (!input) return defaultTopic ? [defaultTopic] : [];
   const rawList = Array.isArray(input) ? input : input.split(';');
   const cleaned = rawList.map((t) => t.trim()).filter((t) => t.length > 0);
   const unique = Array.from(new Set(cleaned));
-  return unique.length > 0 ? unique : [defaultTopic];
+  if (unique.length > 0) return unique;
+  return defaultTopic ? [defaultTopic] : [];
 }
 
 /**
@@ -86,7 +88,10 @@ export class ContinuousTopicScheduler {
       stateFilePath?: string;
     }
   ) {
-    this.topics = topics.length > 0 ? [...topics] : ['new model'];
+    if (!topics || topics.length === 0) {
+      throw new Error('ContinuousTopicScheduler requires at least one topic');
+    }
+    this.topics = [...topics];
     this.maxRunsPer24h = Math.max(1, options?.maxRunsPer24h ?? 1);
     this.windowMs = options?.windowMs ?? DEFAULT_WINDOW_MS;
     this.stateFilePath = options?.stateFilePath;
@@ -204,6 +209,9 @@ export async function runPipeline24h<TOptions = any, TResult = any>(
   options: Pipeline24hOptions<TOptions, TResult>
 ): Promise<void> {
   const topics = parseTopics(options.topics);
+  if (topics.length === 0) {
+    throw new Error('runPipeline24h requires at least one non-empty topic in options.topics');
+  }
   const maxRuns = Math.max(1, options.maxRunsPer24h ?? 1);
   const errorCooldownMs = options.errorCooldownMs ?? DEFAULT_ERROR_COOLDOWN_MS;
   const signal = options.signal;

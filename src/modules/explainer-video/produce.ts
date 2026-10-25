@@ -167,6 +167,7 @@ export async function produceExplainerVideo(
       outVideoPath: videoPath,
       engine,
       browserPath: engine === 'chromium' ? options.browserPath : undefined,
+      concurrency: options.concurrency,
       crf,
       preset,
       onProgress: (renderedFrames, totalFrames) => {

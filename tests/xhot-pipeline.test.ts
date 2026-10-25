@@ -11,6 +11,7 @@ import {
   generateFinalReportJson,
   saveFinalReports,
   printExecutiveSummary,
+  parseTopics,
   type XHotFullResult,
 } from '../src/pipelines/index.js';
 import {
@@ -37,12 +38,49 @@ test('xhot pipeline stages are correctly defined', { timeout: 10_000 }, () => {
 
 test('XHotPipelineOptionsSchema validates query and defaults', { timeout: 5_000 }, () => {
   const parsed = XHotPipelineOptionsSchema.parse({
-    query: 'new model',
+    query: 'AI agents',
   });
-  assert.equal(parsed.query, 'new model');
+  assert.equal(parsed.query, 'AI agents');
   assert.equal(parsed.candidateCount, 12);
   assert.equal(parsed.explainerEngine, 'chromium');
   assert.equal(parsed.dryRun, false);
+
+  // Missing or empty query throws validation error
+  assert.throws(() => {
+    XHotPipelineOptionsSchema.parse({} as any);
+  });
+  assert.throws(() => {
+    XHotPipelineOptionsSchema.parse({ query: '' });
+  });
+});
+
+test('Xhot pipeline topic resolution: CLI and ENV priority, fails when absent', () => {
+  // Test topic resolution behavior
+  const resolveTopics = (queryArg?: string, opts: any = {}, env: Record<string, string | undefined> = {}) => {
+    const rawTopics = opts.topics || opts.query || queryArg || env.XHOT_TOPICS || env.XHOT_TOPIC;
+    return parseTopics(rawTopics);
+  };
+
+  // 1. CLI query argument
+  assert.deepEqual(resolveTopics('quantum computing'), ['quantum computing']);
+
+  // 2. CLI options (--query)
+  assert.deepEqual(resolveTopics(undefined, { query: 'robotics' }), ['robotics']);
+
+  // 3. CLI options (--topics with semicolons)
+  assert.deepEqual(resolveTopics(undefined, { topics: 'deepseek;claude 3.7' }), ['deepseek', 'claude 3.7']);
+
+  // 4. Environment variable XHOT_TOPICS
+  assert.deepEqual(resolveTopics(undefined, {}, { XHOT_TOPICS: 'topicA;topicB' }), ['topicA', 'topicB']);
+
+  // 5. Environment variable XHOT_TOPIC
+  assert.deepEqual(resolveTopics(undefined, {}, { XHOT_TOPIC: 'singleTopic' }), ['singleTopic']);
+
+  // 6. CLI overrides Environment variable
+  assert.deepEqual(resolveTopics('cliTopic', {}, { XHOT_TOPIC: 'envTopic' }), ['cliTopic']);
+
+  // 7. No topic provided at all -> empty array (triggering error exit)
+  assert.deepEqual(resolveTopics(undefined, {}, {}), []);
 });
 
 test('buildXHotGrid creates valid NxN contact grid with numbering badges', { timeout: 15_000 }, async () => {

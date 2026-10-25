@@ -1,5 +1,5 @@
 /**
- * Viral Video Maker Pipeline — self-contained module.
+ * FlowTutor Pipeline — self-contained module.
  */
 export * from './contracts.js';
 export * from './evaluation-requirements.js';

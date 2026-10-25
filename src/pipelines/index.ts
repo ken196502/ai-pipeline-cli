@@ -8,11 +8,11 @@
  */
 import { pipelineRegistry } from './core/registry.js';
 import { xhotPipeline } from './xhot/execute.js';
-import { ytbhotPipeline } from './ytbhot/execute.js';
+import { flowTutorPipeline } from './flowtutor/execute.js';
 
 // ── Auto-register available pipelines ───────────────────────────
 pipelineRegistry.register(xhotPipeline);
-pipelineRegistry.register(ytbhotPipeline);
+pipelineRegistry.register(flowTutorPipeline);
 
 // ── Exports ─────────────────────────────────────────────────────
 export * from './core/index.js';
@@ -32,9 +32,18 @@ export {
   handleXHotCommand,
 } from './xhot/index.js';
 export {
-  ytbhotPipeline,
-  executeViralVideo as executeYtbHotPipeline,
-  type ViralPipelineOptions as YtbHotPipelineOptions,
-  type ViralPipelineResult as YtbHotPipelineResult,
-} from './ytbhot/index.js';
+  flowTutorPipeline,
+  executeFlowTutorVideo,
+  type FlowTutorPipelineOptions,
+  type FlowTutorPipelineResult,
+  type FlowTutorPipelineInput,
+  FLOW_TUTOR_PIPELINE_STAGES,
+  FlowTutorPipelineOptionsSchema,
+  FLOW_TUTOR_EVALUATION_REQUIREMENTS,
+  DEFAULT_FLOW_TUTOR_QUERY,
+  DEFAULT_FLOW_TUTOR_EVALUATION_FOCUS,
+  runFlowTutorPipeline,
+  attachFlowTutorOptions,
+  handleFlowTutorCommand,
+} from './flowtutor/index.js';
 export { pipelineRegistry };

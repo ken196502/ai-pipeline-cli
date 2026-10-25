@@ -1,13 +1,13 @@
 {
   "name": "aigc-pipeline",
   "version": "2.0.0",
-  "description": "AIGC Pipeline Platform: Multi-pipeline AIGC automation framework. Currently includes the Xhot trending video pipeline with more pipelines to come.",
+  "description": "AIGC Pipeline Platform: Multi-pipeline AIGC automation framework. Pipelines: xhot (X trending video), flowTutor (YouTube AI video tutorial replication).",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
     "aigc": "./dist/cli.js",
     "xhot": "./dist/cli.js",
-    "ytbhot": "./dist/cli.js"
+    "flowTutor": "./dist/cli.js"
   },
   "scripts": {
     "start": "tsx src/cli.ts",
@@ -22,7 +22,7 @@
     "module:presentation": "tsx src/modules/explainer-video/cli.ts",
     "lib:asr": "tsx src/libs/asr/cli.ts",
     "pipeline:xhot": "tsx src/cli.ts xhot",
-    "pipeline:ytbhot": "tsx src/cli.ts ytbhot",
+    "pipeline:flowTutor": "tsx src/cli.ts flowTutor",
 
     "build": "tsc",
     "test": "tsx --test tests/*.test.ts",

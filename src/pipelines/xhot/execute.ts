@@ -241,8 +241,10 @@ export async function executeXHotPipeline(
         fps: options.explainerFps ?? options.tutorialFps,
         engine: options.explainerEngine ?? options.tutorialEngine,
         subtitles: options.explainerSubtitles ?? options.tutorialSubtitles,
+        concurrency: options.explainerConcurrency,
         ttsVoice: options.ttsVoice,
         ttsRate: options.ttsRate,
+        ttsInstruct: options.ttsInstruct,
         profileDir,
         onProgress: (stg, msg) => notify('x-video', `[${stg}] ${msg}`),
       });

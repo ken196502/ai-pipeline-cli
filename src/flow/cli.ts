@@ -13,7 +13,7 @@ import pc from 'picocolors';
 import path from 'node:path';
 import { FlowClient } from './client.js';
 import { parseViewport } from '../browser/launcher.js';
-import { sendMsg, formatDetailedErrorMessage } from '../utils/send_msg.js';
+import { notifyError, formatDetailedErrorMessage } from '../utils/send_msg.js';
 
 const program = new Command();
 const client = new FlowClient();
@@ -217,7 +217,7 @@ program
             `• Completed: ${batchResult.completedClips}/${batchResult.totalClips}`,
             `• Output Folder: ${batchResult.outDir}`,
           ].join('\n');
-          await sendMsg(alertMsg);
+          await notifyError(alertMsg);
         } catch {}
       }
     } catch (err: any) {
@@ -228,7 +228,7 @@ program
       if (!isCliArgValidationError) {
         try {
           const detailedMsg = formatDetailedErrorMessage(err, '❌ Flow batch generation failed');
-          await sendMsg(detailedMsg);
+          await notifyError(detailedMsg);
         } catch {}
       }
     } finally {

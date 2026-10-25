@@ -3,23 +3,35 @@ import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import pc from 'picocolors';
 import { parseViewport } from '../../browser/launcher.js';
-import { sendMsg, formatDetailedErrorMessage, isLlmUnavailableError, notifyLlmUnavailableAndExit } from '../../utils/send_msg.js';
+import {
+  sendMsg,
+  notifyError,
+  formatDetailedErrorMessage,
+  isLlmUnavailableError,
+  notifyLlmUnavailableAndExit,
+} from '../../utils/send_msg.js';
 import { pipelineRegistry } from '../core/registry.js';
-import { ytbhotPipeline } from './execute.js';
+import { acquirePipelineLock } from '../core/lock.js';
+import { flowTutorPipeline } from './execute.js';
 
-export async function runYtbHotPipeline(rawOptions: ViralPipelineInput) {
-  if (!pipelineRegistry.get('ytbhot')) {
-    pipelineRegistry.register(ytbhotPipeline);
+/**
+ * Pipelines that share this project's persistent Chromium profile — a second
+ * concurrent run would hijack the first one's browser session.
+ */
+const PIPELINE_IDS = ['xhot', 'flowTutor'];
+
+export async function runFlowTutorPipeline(rawOptions: FlowTutorPipelineInput) {
+  if (!pipelineRegistry.get('flowTutor')) {
+    pipelineRegistry.register(flowTutorPipeline);
   }
-  return pipelineRegistry.run<ViralPipelineInput, any>('ytbhot', rawOptions);
+  return pipelineRegistry.run<FlowTutorPipelineInput, any>('flowTutor', rawOptions);
 }
-export const runViralVideoPipeline = runYtbHotPipeline;
-import { printExecutiveSummary } from './report.js';
 import { exitAfterFlush } from '../../utils/shutdown.js';
-import type { PipelineStage, ViralPipelineInput } from './contracts.js';
-import { DEFAULT_VIRAL_QUERY } from './execute.js';
+import { printExecutiveSummary } from './report.js';
+import type { PipelineStage, FlowTutorPipelineInput } from './contracts.js';
+import { DEFAULT_FLOW_TUTOR_QUERY } from './execute.js';
 import { isTokenConsumingStage } from './failure-policy.js';
-export { DEFAULT_VIRAL_QUERY };
+export { DEFAULT_FLOW_TUTOR_QUERY };
 
 /**
  * Systemic failures that reproduce identically on every retry — the continuous
@@ -35,16 +47,16 @@ const SYSTEMIC_FATAL_CODES = new Set([
 ]);
 
 /**
- * Attaches common options for the viral video pipeline to a commander instance.
+ * Attaches common options for the flowTutor pipeline.
  */
-export function attachViralOptions(cmd: Command): Command {
+export function attachFlowTutorOptions(cmd: Command): Command {
   cmd
-    .argument('[query]', 'Search query or viral topic', DEFAULT_VIRAL_QUERY)
+    .argument('[query]', 'Search query or viral topic', DEFAULT_FLOW_TUTOR_QUERY)
     .option('-q, --query <string>', 'Search query or viral topic')
     .option('-t, --topic <string>', 'Override canonical evaluation topic')
     .option('--standard <path>', 'Path to custom evaluation standard JSON file')
     .option('--save-standard <path>', 'Custom destination path to save evaluation standard')
-    .option('--standards-dir <path>', 'Custom directory containing reusable evaluation standards (defaults to storage/viral-video-maker/standards)')
+    .option('--standards-dir <path>', 'Custom directory containing reusable evaluation standards (defaults to storage/flowTutor/standards)')
     .option('--force-new-standard', 'Ignore existing standard and distill new 3-round LLM standard', false)
     .option('--remove-standard', 'Remove existing evaluation standard file on disk and distill a fresh one', false)
     .option('--remove-existing-standard', 'Remove existing evaluation standard file on disk and distill a fresh one', false)
@@ -99,10 +111,19 @@ export function attachViralOptions(cmd: Command): Command {
 }
 
 /**
- * Executes the viral video pipeline CLI handler with formatted progress output and summary.
+ * Executes the flowTutor pipeline CLI handler with formatted progress output and summary.
  */
-export async function handleViralCommand(queryArg: string | undefined, opts: any): Promise<void> {
-  const query = opts.query || queryArg || DEFAULT_VIRAL_QUERY;
+export async function handleFlowTutorCommand(queryArg: string | undefined, opts: any): Promise<void> {
+  // Refuse to start while another pipeline holds the shared browser profile.
+  // Throws PipelineConflictError (handled by src/cli.ts → exit 2) before any
+  // banner output, stage execution, browser launch, or Telegram alert.
+  await acquirePipelineLock({
+    pipelineId: 'flowTutor',
+    profileDir: opts.profileDir,
+    pipelineIds: PIPELINE_IDS,
+  });
+
+  const query = opts.query || queryArg || DEFAULT_FLOW_TUTOR_QUERY;
   const removeAllStandards = Boolean(opts.removeAllStandards || opts.cleanAllStandards);
   const removeExistingStandard = Boolean(
     removeAllStandards || opts.removeExistingStandard || opts.removeStandard || opts.cleanStandard || opts.deleteStandard
@@ -156,7 +177,7 @@ export async function handleViralCommand(queryArg: string | undefined, opts: any
 
   let lastStage: string | null = null;
 
-  const pipelineOptions: ViralPipelineInput = {
+  const pipelineOptions: FlowTutorPipelineInput = {
     query,
     topic: opts.topic,
     standardPath: opts.standard,
@@ -216,7 +237,7 @@ export async function handleViralCommand(queryArg: string | undefined, opts: any
   };
 
   try {
-    const result = await runYtbHotPipeline(pipelineOptions);
+    const result = await runFlowTutorPipeline(pipelineOptions);
     printExecutiveSummary(result);
 
     if (stopBeforeGen) {
@@ -228,7 +249,7 @@ export async function handleViralCommand(queryArg: string | undefined, opts: any
       console.log(`   ${pc.cyan('Full Report:')}     ${reportPath}`);
       console.log(`   ${pc.cyan('Output Dir:')}      ${result.outDir}`);
       console.log(`\n${pc.bold('To generate video after review, re-run without --stop-before-gen:')}`);
-      console.log(`   ${pc.dim('npx tsx src/pipeline/pipelines/viral-video-maker.ts')} "${query}" ${pc.dim('--out-dir ' + result.outDir)}`);
+      console.log(`   ${pc.dim('npx tsx src/cli.ts flowTutor')} "${query}" ${pc.dim('--out-dir ' + result.outDir)}`);
       console.log('');
       return;
     }
@@ -251,14 +272,15 @@ export async function handleViralCommand(queryArg: string | undefined, opts: any
       const flowProjectUrl =
         result.flowProject?.url || (flowProjectId ? `https://flow.google.com/project/${flowProjectId}` : undefined);
       const msgLines = [
-        `⚠️ Viral pipeline completed with partial failure: ${issues.join('; ')}`,
+        `⚠️ FlowTutor pipeline completed with partial failure: ${issues.join('; ')}`,
         ...(flowProjectId ? [`• Flow Project ID: ${flowProjectId}`] : []),
         ...(flowProjectUrl ? [`• Flow Project URL: ${flowProjectUrl}`] : []),
         `\n• Log: ${logPath}`,
         `• Report: ${reportPath}`,
         `• Output Dir: ${result.outDir}`,
       ];
-      await sendMsg(msgLines.join('\n')).catch((e) => {
+      // Failure-ish alert: Telegram AND Pi inbound, so the agent can react.
+      await notifyError(msgLines.join('\n')).catch((e) => {
         console.error(pc.yellow(`[webhook] Warning: Failed to send notification: ${e.message}`));
       });
       // A token/credit-spending stage failing (e.g. the caught tutorial-gen) must stop
@@ -279,7 +301,7 @@ export async function handleViralCommand(queryArg: string | undefined, opts: any
       const winner = result.evaluation.winner;
       const minutes = (result.totalDurationMs / 60000).toFixed(1);
       const msgLines = [
-        `✅ Viral pipeline completed successfully in ${minutes} min`,
+        `✅ FlowTutor pipeline completed successfully in ${minutes} min`,
         `• Query: ${result.query}`,
         `• Winner: ${winner.title} (${winner.videoId})`,
         `• Score: ${result.evaluation.compositeScore.toFixed(2)}/5.00`,
@@ -308,9 +330,9 @@ export async function handleViralCommand(queryArg: string | undefined, opts: any
     const logPath = err?.logPath ? path.resolve(err.logPath) : path.join(outDirResolved, 'pipeline.log');
     if (isLlmUnavailableError(err)) {
       await notifyLlmUnavailableAndExit(err, {
-        stage: 'viral-video-maker',
+        stage: 'flowTutor',
         task: 'pipeline-execution',
-        context: 'Viral Video Maker Pipeline',
+        context: 'FlowTutor Pipeline',
         shouldExit: true,
         logPath,
         outDir: outDirResolved,
@@ -323,13 +345,15 @@ export async function handleViralCommand(queryArg: string | undefined, opts: any
     const flowProjectId = err.flowProjectId || opts.projectId;
     const flowProjectUrl =
       err.flowProjectUrl || (flowProjectId ? `https://flow.google.com/project/${flowProjectId}` : undefined);
-    const detailedMsg = formatDetailedErrorMessage(err, '❌ Viral pipeline failed', {
+    const detailedMsg = formatDetailedErrorMessage(err, '❌ FlowTutor pipeline failed', {
       logPath,
       outDir: outDirResolved,
       flowProjectId,
       flowProjectUrl,
     });
-    await sendMsg(detailedMsg).catch((e) => {
+    // Fatal failure: Telegram AND Pi inbound. Telegram alone left the Pi agent
+    // unaware, so nobody could act on the failure (see plan-notify-error-dual-channel.md).
+    await notifyError(detailedMsg).catch((e) => {
       console.error(pc.yellow(`[webhook] Warning: Failed to send notification: ${e.message}`));
     });
     // Systemic media/prompt failures exit with a dedicated code (3) so the
@@ -344,19 +368,18 @@ export async function handleViralCommand(queryArg: string | undefined, opts: any
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const program = new Command();
   program
-    .name('ytbhot')
-    .alias('viral-video-maker')
-    .description('Autonomous "AI make Niche Viral Video" YouTube End-to-End Pipeline')
+    .name('flowTutor')
+    .description('FlowTutor: find YouTube AI video tutorials worth replicating, extract their prompts, and reproduce them with Flow Veo')
     .version('1.0.0');
 
-  attachViralOptions(program);
+  attachFlowTutorOptions(program);
   program.action(async (queryArg, opts) => {
-    await handleViralCommand(queryArg, opts);
-    await exitAfterFlush(process.exitCode ?? 0, 'ytbhot');
+    await handleFlowTutorCommand(queryArg, opts);
+    await exitAfterFlush(process.exitCode ?? 0, 'flowTutor');
   });
 
   program.parseAsync(process.argv).catch(async (err) => {
     console.error(err);
-    await exitAfterFlush(1, 'ytbhot');
+    await exitAfterFlush(1, 'flowTutor');
   });
 }

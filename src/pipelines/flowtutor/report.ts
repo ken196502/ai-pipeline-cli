@@ -11,7 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pc from 'picocolors';
 import { markdownToHtml } from '../../utils/markdown-to-html.js';
-import type { ViralPipelineResult } from './contracts.js';
+import type { FlowTutorPipelineResult } from './contracts.js';
 
 /** Project root derived from this module's location (works for both src/ and dist/). */
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
@@ -37,7 +37,7 @@ function shortHash(h: string | undefined | null): string {
 /**
  * Generates the complete, human-readable Markdown execution report.
  */
-export function generateFinalReportMarkdown(result: ViralPipelineResult): string {
+export function generateFinalReportMarkdown(result: FlowTutorPipelineResult): string {
   const {
     runId,
     query,
@@ -396,7 +396,7 @@ export function generateFinalReportMarkdown(result: ViralPipelineResult): string
 /**
  * Generates the formatted JSON string representing the complete pipeline result.
  */
-export function generateFinalReportJson(result: ViralPipelineResult): string {
+export function generateFinalReportJson(result: FlowTutorPipelineResult): string {
   return JSON.stringify(result, null, 2);
 }
 
@@ -405,7 +405,7 @@ export function generateFinalReportJson(result: ViralPipelineResult): string {
  * to the target directory.
  */
 export async function saveFinalReports(
-  result: ViralPipelineResult,
+  result: FlowTutorPipelineResult,
   outDir: string
 ): Promise<{ jsonPath: string; markdownPath: string; htmlPath: string }> {
   const resolvedDir = path.resolve(outDir);
@@ -435,7 +435,7 @@ export async function saveFinalReports(
 export const generateExecutiveMarkdownReport = generateFinalReportMarkdown;
 export const generateExecutiveJsonReport = generateFinalReportJson;
 export async function saveExecutionReports(
-  result: ViralPipelineResult,
+  result: FlowTutorPipelineResult,
   outDir: string
 ): Promise<{ jsonPath: string; markdownPath: string; mdPath: string; htmlPath: string }> {
   const { jsonPath, markdownPath, htmlPath } = await saveFinalReports(result, outDir);
@@ -445,7 +445,7 @@ export async function saveExecutionReports(
 /**
  * Displays an executive terminal summary upon pipeline completion.
  */
-export function printExecutiveSummary(result: ViralPipelineResult): void {
+export function printExecutiveSummary(result: FlowTutorPipelineResult): void {
   const winner = result.evaluation.winner;
   const elapsed = (result.totalDurationMs / 1000).toFixed(1);
 

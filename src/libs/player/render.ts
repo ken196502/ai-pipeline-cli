@@ -271,6 +271,7 @@ export interface RenderExplainerVideoParams {
   engine?: ExplainerRenderEngine;
   /** Chromium executable path (engine 'chromium' only; auto-detected if omitted). */
   browserPath?: string;
+  concurrency?: number;
   crf?: number;
   preset?: string;
   logFilePath?: string;
@@ -300,7 +301,9 @@ export function resolveRenderConcurrency(cpuCount: number, override?: number): n
   if (override !== undefined && Number.isFinite(override) && override > 0) {
     return Math.max(1, Math.floor(override));
   }
-  return Math.max(1, Math.min(2, Math.floor((cpuCount || 2) / 2)));
+  // Default to 2 workers to leverage multi-threading and dual-thread GPU acceleration,
+  // matching VideoGen dual-thread chunk rendering performance.
+  return 2;
 }
 
 /**
@@ -350,7 +353,10 @@ export async function renderExplainerVideo(
 
     const cpuCount = os.cpus()?.length || 2;
     const concurrencyEnv = process.env.EXPLAINER_RENDER_CONCURRENCY || process.env.TUTORIAL_RENDER_CONCURRENCY;
-    const CONCURRENCY = resolveRenderConcurrency(cpuCount, Number(concurrencyEnv));
+    const CONCURRENCY = resolveRenderConcurrency(
+      cpuCount,
+      params.concurrency ?? (concurrencyEnv ? Number(concurrencyEnv) : undefined)
+    );
     const frameTimeoutEnv = process.env.EXPLAINER_FRAME_TIMEOUT_MS || process.env.TUTORIAL_FRAME_TIMEOUT_MS;
     const FRAME_TIMEOUT_MS = resolveFrameTimeoutMs(Number(frameTimeoutEnv));
     let taskIndex = 0;
@@ -410,6 +416,7 @@ export async function renderExplainerVideo(
             document.getElementById('controls')?.remove();
           });
 
+          const ffmpegPreset = params.preset || 'ultrafast';
           chunkFfmpeg = spawn('ffmpeg', [
             '-y',
             '-f', 'image2pipe',
@@ -418,7 +425,8 @@ export async function renderExplainerVideo(
             '-vf', 'setsar=1/1',
             '-aspect', '16:9',
             '-c:v', 'libx264',
-            '-preset', params.preset || 'fast',
+            '-preset', ffmpegPreset,
+            '-threads', '2',
             '-crf', String(params.crf ?? 20),
             '-pix_fmt', 'yuv420p',
             '-r', String(fps),

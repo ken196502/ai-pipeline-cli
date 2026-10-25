@@ -13,14 +13,18 @@ import {
   notifyLlmUnavailableAndExit,
 } from '../../utils/send_msg.js';
 import { formatDurationMs } from '../../utils/time.js';
-import { parseTopics, runPipeline24h } from '../core/index.js';
+import { acquirePipelineLock, parseTopics, runPipeline24h } from '../core/index.js';
 import type { XHotPipelineOptions, XHotFullResult } from './contracts.js';
 
-export const DEFAULT_XHOT_QUERY = 'new model';
+/**
+ * Pipelines that share this project's persistent Chromium profile — a second
+ * concurrent run would hijack the first one's browser session.
+ */
+const PIPELINE_IDS = ['xhot', 'flowTutor'];
 
 export function attachXHotOptions(cmd: Command): Command {
   return cmd
-    .argument('[query]', 'Topic to search on X (e.g. "new model")', DEFAULT_XHOT_QUERY)
+    .argument('[query]', 'Topic to search on X (e.g. "AI agents")')
     .option('-q, --query <string>', 'Topic to search on X')
     .option('--topics <topics>', 'Semicolon-separated list of topics for sequential/24h execution (e.g. "AI;new model;deepseek r1")')
     .option('--24h [limit]', 'Run continuously in 24-hour cycle mode. Max runs per topic per 24 hours (default: 1)', (v) => {
@@ -154,6 +158,15 @@ async function reportPipelineError(err: any, topic: string, defaultOutDir?: stri
 }
 
 export async function handleXHotCommand(queryArg?: string, opts: any = {}): Promise<void> {
+  // Refuse to start while another pipeline holds the shared browser profile.
+  // Throws PipelineConflictError (handled by src/cli.ts → exit 2) before any
+  // banner output, stage execution, browser launch, or Telegram alert.
+  await acquirePipelineLock({
+    pipelineId: 'xhot',
+    profileDir: opts.profileDir,
+    pipelineIds: PIPELINE_IDS,
+  });
+
   // Normalize --24h flag value
   const is24hMode = opts['24h'] !== undefined;
   let maxRunsPer24h = 1;
@@ -164,9 +177,21 @@ export async function handleXHotCommand(queryArg?: string, opts: any = {}): Prom
     maxRunsPer24h = isNaN(parsed) ? 1 : Math.max(1, parsed);
   }
 
-  // Parse topics from --topics or query arg (support semicolon separation)
-  const rawTopics = opts.topics || opts.query || queryArg;
-  const topics = parseTopics(rawTopics, DEFAULT_XHOT_QUERY);
+  // Resolve topics from:
+  // 1. CLI options: --topics or --query / queryArg
+  // 2. Environment variables: XHOT_TOPICS or XHOT_TOPIC
+  const rawTopics = opts.topics || opts.query || queryArg || process.env.XHOT_TOPICS || process.env.XHOT_TOPIC;
+  const topics = parseTopics(rawTopics);
+
+  if (!topics || topics.length === 0) {
+    console.error(pc.red('\n❌ Xhot pipeline configuration error: No search topic specified.'));
+    console.error(pc.yellow('Please provide a topic via:'));
+    console.error(pc.dim('  • CLI argument:      aigc xhot "your topic"'));
+    console.error(pc.dim('  • CLI option:        aigc xhot -q "your topic" or --topics "topic1;topic2"'));
+    console.error(pc.dim('  • Environment var:   XHOT_TOPICS="topic1;topic2" or XHOT_TOPIC="your topic" in .env\n'));
+    await exitAfterFlush(1, 'xhot');
+    return;
+  }
 
   const baseOptions: Omit<XHotPipelineOptions, 'query'> = {
     outDir: opts.outDir ? path.resolve(opts.outDir) : undefined,

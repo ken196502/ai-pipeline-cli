@@ -59,6 +59,22 @@ async function downloadTweetVideo(tweetUrl: string, destMp4Path: string): Promis
   }
 }
 
+function parseMetricNumber(text?: string | null): number {
+  if (!text) return 0;
+  const cleaned = text.trim().replace(/,/g, '');
+  const match = cleaned.match(/^([\d.]+)\s*([KkMmBb])?$/);
+  if (!match) {
+    const direct = parseInt(cleaned, 10);
+    return isNaN(direct) ? 0 : direct;
+  }
+  const num = parseFloat(match[1]);
+  const mult = match[2]?.toUpperCase();
+  if (mult === 'K') return Math.round(num * 1_000);
+  if (mult === 'M') return Math.round(num * 1_000_000);
+  if (mult === 'B') return Math.round(num * 1_000_000_000);
+  return Math.round(num);
+}
+
 interface ScannedCandidateTweet {
   index: number;
   tweetId: string;
@@ -69,6 +85,13 @@ interface ScannedCandidateTweet {
   screenshotPath: string;
   imageUrls: string[];
   hasVideo: boolean;
+  metrics: {
+    replies: number;
+    reposts: number;
+    likes: number;
+    views: number;
+  };
+  engagementScore: number;
 }
 
 /**
@@ -146,6 +169,29 @@ export async function harvestWinnerTopicMaterials(
         const textEl = await tweetEl.$('[data-testid="tweetText"]');
         const text = textEl ? (await textEl.innerText()).trim() : '';
 
+        // Metrics: views, replies, reposts, likes
+        const metricOf = async (sel: string) => {
+          const el = await tweetEl.$(sel);
+          return el ? parseMetricNumber(await el.innerText().catch(() => '0')) : 0;
+        };
+        const replies = await metricOf('[data-testid="reply"]');
+        const reposts = await metricOf('[data-testid="retweet"]');
+        const likes = await metricOf('[data-testid="like"]');
+        const analyticsEl = await tweetEl.$('a[href*="/analytics"]');
+        const views = analyticsEl
+          ? parseMetricNumber(await analyticsEl.innerText().catch(() => '0'))
+          : 0;
+
+        const metrics = { replies, reposts, likes, views };
+        const totalEngagement = replies + reposts + likes;
+        // Priority rule: Discard tweets with zero views AND zero engagement
+        if (views === 0 && totalEngagement === 0) {
+          report(`Skipping low-quality tweet [${authorHandle}] with 0 views and 0 engagement`);
+          continue;
+        }
+
+        const engagementScore = views * 1 + replies * 50 + reposts * 20 + likes * 5;
+
         // Capture preview screenshot card
         await tweetEl.scrollIntoViewIfNeeded().catch(() => {});
         await page.waitForTimeout(200);
@@ -158,13 +204,18 @@ export async function harvestWinnerTopicMaterials(
           await page.screenshot({ path: screenshotPath, type: 'png' });
         }
 
-        // Detect images
+        // Detect images - request orig/large high-res version
         const imgEls = await tweetEl.$$('img[src*="pbs.twimg.com/media/"]');
         const imageUrls: string[] = [];
         for (const imgEl of imgEls) {
           const src = await imgEl.getAttribute('src');
           if (src) {
-            imageUrls.push(src.replace(/name=\w+/, 'name=large'));
+            // Replace with orig (or large) resolution, never low-res thumb
+            let clean = src.replace(/name=\w+/, 'name=orig');
+            if (!clean.includes('name=')) {
+              clean = clean.includes('?') ? `${clean}&name=orig` : `${clean}?name=orig`;
+            }
+            imageUrls.push(clean);
           }
         }
 
@@ -182,9 +233,13 @@ export async function harvestWinnerTopicMaterials(
           screenshotPath,
           imageUrls,
           hasVideo,
+          metrics,
+          engagementScore,
         });
 
-        report(`Scanned candidate #${candIndex}: [${authorHandle}] (Images: ${imageUrls.length}, HasVideo: ${hasVideo})`);
+        report(
+          `Scanned candidate #${candIndex}: [${authorHandle}] (Views: ${views}, Likes: ${likes}, Reposts: ${reposts}, Replies: ${replies}, Images: ${imageUrls.length}, HasVideo: ${hasVideo})`
+        );
       } catch (err: any) {
         // Skip single tweet parse error
       }
@@ -197,7 +252,14 @@ export async function harvestWinnerTopicMaterials(
     }
   }
 
-  report(`Found ${scannedCandidates.length} candidate tweets. Evaluating richness with VL to select top ${targetCount}...`);
+  report(`Found ${scannedCandidates.length} candidate tweets. Prioritizing by views & engagement score...`);
+
+  // Sort candidates by engagementScore descending so VL richness eval & selection considers highest-impact tweets first
+  scannedCandidates.sort((a, b) => b.engagementScore - a.engagementScore);
+  // Re-index for consistent 1-N reference
+  scannedCandidates.forEach((c, idx) => {
+    c.index = idx + 1;
+  });
 
   // Evaluate candidate richness with VL
   let selectedIndices: number[] = [];
@@ -237,11 +299,15 @@ export async function harvestWinnerTopicMaterials(
 
     const mediaFiles: XHotHarvestItem['mediaFiles'] = [];
 
-    // Download images
+    // Download images (attempt orig, fallback to large)
     for (let mIdx = 0; mIdx < cand.imageUrls.length; mIdx++) {
       const cleanUrl = cand.imageUrls[mIdx];
       const localImgPath = path.join(mediaDir, `img-${harvestIndex}-${mIdx + 1}.jpg`);
-      const ok = await downloadImage(cleanUrl, localImgPath);
+      let ok = await downloadImage(cleanUrl, localImgPath);
+      if (!ok && cleanUrl.includes('name=orig')) {
+        const fallbackUrl = cleanUrl.replace('name=orig', 'name=large');
+        ok = await downloadImage(fallbackUrl, localImgPath);
+      }
       if (ok) {
         mediaFiles.push({ kind: 'image', localPath: localImgPath, url: cleanUrl });
         totalMediaFiles++;
@@ -294,6 +360,7 @@ export async function harvestWinnerTopicMaterials(
       authorName: cand.authorName,
       authorHandle: cand.authorHandle,
       text: cand.text,
+      metrics: cand.metrics,
       mediaFiles,
       asrTranscript,
       screenshotPath: finalShotPath,

@@ -22,6 +22,7 @@ export interface CreateExplainerVideoOptions {
   height?: number;
   engine?: 'firefox' | 'chromium';
   subtitles?: boolean;
+  concurrency?: number;
   ttsVoice?: string;
   ttsRate?: string;
   ttsInstruct?: string;
@@ -67,6 +68,7 @@ export interface ExplainerProduceOptions {
   height?: number;
   engine?: 'firefox' | 'chromium';
   subtitles?: boolean;
+  concurrency?: number;
   ttsVoice?: string;
   ttsRate?: string;
   ttsInstruct?: string;

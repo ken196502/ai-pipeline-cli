@@ -70,15 +70,16 @@ export async function buildExplainerAssets(
     const item = harvestResult.items[i];
     const prefix = `tweet-${String(i + 1).padStart(2, '0')}`;
 
-    // Tweet Screenshot
-    if (item.screenshotPath) {
+    // Tweet Screenshot - only include as candidate if the tweet doesn't have direct media files,
+    // avoiding filling the asset pool with blurry/compressed tweet bounding-box cards.
+    if (item.screenshotPath && item.mediaFiles.length === 0) {
       try {
         const dest = path.join(assetsOutDir, `${prefix}-shot.png`);
         await fs.copyFile(item.screenshotPath, dest);
         imageAssets.push({
           id: `${prefix}-shot`,
           kind: 'image',
-          label: `Tweet by ${item.authorName} (${item.authorHandle})`,
+          label: `Community Tweet by ${item.authorName} (${item.authorHandle})`,
           src: `assets/${path.basename(dest)}`,
           sourcePath: dest,
         });
@@ -148,13 +149,13 @@ export async function generateExplainerStoryboardFromXHot(
 
   const systemPrompt = `You are a world-class technology journalist, lead documentary director, and analytical narrator.
 You craft calm, authoritative, deeply informative, and engaging documentary videos about breaking tech announcements and hot AI models based on X (Twitter) trending discussions.
-The presentation is rendered using the OpusVideo canvas procedural engine with a split layout:
-- Left column: punchy 3-8 word takeaway phrases with highlight pops
-- Right column: matching visual material:
-  * "flash" component: for rapid, cinematic split-second cutaways across trending candidate tweets (e.g. "flash" or "flash:candidates")
-  * Tweet screenshots (e.g. 'tweet-01-shot', 'tweet-02-shot')
-  * Live demo videos & media previews (e.g. 'tweet-01-video-1', 'tweet-02-image-1')
-  * Lucide vector icons ('sparkles', 'zap', 'flame', 'award', 'trending-up', 'cpu', 'code', 'globe')
+The presentation is rendered using the OpusVideo canvas procedural engine featuring two parallel, distinct visual modes:
+1. Standard Split Layout (elements component):
+   - Left column: punchy 3-8 word takeaway phrases with highlight pops
+   - Right column: matching visual material (tweet screenshots like 'tweet-01-shot', demo videos like 'tweet-01-video-1', or Lucide vector icons like 'sparkles', 'zap', 'flame', 'award', 'trending-up', 'cpu', 'code', 'globe').
+2. Fullscreen Flash Component (standalone montage):
+   - A dedicated, full-screen rapid montage that cycles through a set of candidate assets (one snapshot every 0.2s) in sync with the spoken narration.
+   - Script Rule: The script is strictly stripped of any visual effect, transition, or animation specifications. The script ONLY arranges the narration lines and specifies the asset group name ('flash:candidates' or 'flash'). All pacing, zoom pulses, shutter effects, and rendering are handled autonomously by the player engine.
 
 Tone & Narration Voice Guidelines:
 - Tone must be calm, steady, insightful, professional, and natural.
@@ -177,21 +178,23 @@ ${assetListText}
 ${tweetSummaries}
 
 【Requirements】
-0. VIDEO MATERIAL PRIORITY (MANDATORY):
+0. MEDIA ASSET PRIORITY OVER COMPRESSED SCREENSHOTS (MANDATORY):
    - Available video assets: ${videoAssetIds.length > 0 ? videoAssetIds.map((id) => `'${id}'`).join(', ') : 'none'}.
-   - Whenever a harvested tweet has a video attachment, you MUST use that video asset as the visual for that tweet instead of its static screenshot ('*-shot').
-   - Reserve static tweet screenshots mainly for community-reaction/proof shots where no video exists. Never let a screenshot replace an available demo video in the Live Demos / Visual Showcase chapter.
+   - Whenever a tweet has a media image or video attachment (e.g. 'tweet-*-image-*' or 'tweet-*-video-*'), you MUST ALWAYS prefer and prioritize that direct high-res media asset over the static compressed tweet screenshot ('*-shot').
+   - NEVER use compressed tweet screenshots for product reveals, benchmarks, architecture diagrams, or UI demonstrations when original media images or video clips are available.
+   - Tweet screenshots ('*-shot') are ONLY for showing user tweets in Chapter 2 (Community Reactions) when NO media attachment exists.
 1. Structure the presentation video into 4 or 5 concise chapters:
    - Chapter 0 (Overview/Hook): The emerging topic and trending landscape on X.
-     * IMPORTANT: For the opening hook, DO NOT use a static candidate grid ('xhot-candidate-grid'). Instead, use visualRef: 'flash' (or 'flash:candidates') so the video dynamically cuts through candidate snapshots in a fast-paced montage!
-   - Chapter 1 (The Winner Announcement): Introduce ${evalResult.winner.name}, its core technical capability, and why it ranks at the top.
-   - Chapter 2 (Community Reactions & Proof): Showcase real discussions and user reaction tweets (use tweet shot assets like 'tweet-01-shot', 'tweet-02-shot').
-   - Chapter 3 (Live Demos / Visual Showcase): Feature demo video or media image assets from the tweets (e.g. 'tweet-01-video-1', 'tweet-01-image-1', etc.). Prefer every available '*-video-*' asset here before falling back to screenshots or images.
+     * IMPORTANT: For the opening hook, use a dedicated standalone shot with the Flash component (visualRef: 'flash:candidates' or 'flash'). The script only needs to provide the narration sentence and the asset group name; the player handles full-screen 0.2s rapid playback.
+   - Chapter 1 (The Winner Announcement): Introduce ${evalResult.winner.name}, its core technical capability, and why it ranks at the top. Use original visual media assets ('*-image-*' or '*-video-*') or distinct tech icons ('cpu', 'sparkles', 'zap').
+   - Chapter 2 (Community Reactions & Proof): Showcase real discussions and user reaction tweets (prefer '*-image-*' if available; otherwise 'tweet-01-shot', 'tweet-02-shot').
+   - Chapter 3 (Live Demos / Visual Showcase): Feature demo video or media image assets from the tweets (e.g. 'tweet-01-video-1', 'tweet-05-image-1', etc.). Prefer every available '*-video-*' asset here, followed by '*-image-*' high-res media. DO NOT use '*-shot' in this chapter.
    - Chapter 4 (Future & Perspective): Strategic industry context and balanced forward takeaway.
 2. In each shot:
-   - Provide 2 to 3 elements.
+   - For regular content shots: provide 2 to 3 elements with distinct visual assets or icons.
+   - For the opening flash montage shot: provide a single element specifying ["Trending Candidates Montage", "flash:candidates"] with its corresponding spoken narration sentence.
    - Every phraseText must be 3-8 words, clear, concise, and professional.
-   - visualRef MUST strictly match either 'flash', an asset ID from the Available Assets above, or a valid lucide icon ('sparkles', 'zap', 'flame', 'code', 'trending-up', 'award', 'globe', 'cpu').
+   - visualRef MUST strictly match either 'flash:candidates', an asset ID from the Available Assets above, or a valid lucide icon ('sparkles', 'zap', 'flame', 'code', 'trending-up', 'award', 'globe', 'cpu').
    - Spoken narration sentences must be delivered in natural, composed, measured English (1 sentence per element).
 3. Return PURE JSON adhering to the OpusVideo Storyboard format:
 {
@@ -256,6 +259,7 @@ export async function createExplainerVideo(
     height = 1080,
     engine = 'chromium',
     subtitles = false,
+    concurrency = 2,
     ttsRate = '+0%',
     onProgress,
   } = options;
@@ -295,9 +299,13 @@ export async function createExplainerVideo(
     height,
     engine,
     subtitles,
+    concurrency,
     ttsVoice: options.ttsVoice || 'Ryan',
     ttsRate,
-    ttsInstruct: 'Speak in a calm, steady, composed, professional documentary narrator tone. Avoid theatrical excitement or erratic pitch changes.',
+    ttsInstruct:
+      options.ttsInstruct ||
+      process.env.EXPLAINER_TTS_INSTRUCT ||
+      'Speak with confidence, clarity, and crisp projection like an authoritative tech news anchor. Energetic, distinct, broadcast-ready delivery; strictly avoid whispering, mumbling, or overly quiet tone.',
     browserPath: options.browserPath,
     resultFilename: 'explainer-result.json',
     storyboardFilename: '10-explainer-storyboard.json',

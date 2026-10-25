@@ -32,6 +32,12 @@ export interface EvaluateTweetRichnessOptions {
     authorHandle: string;
     text: string;
     screenshotPath: string;
+    metrics?: {
+      replies: number;
+      reposts: number;
+      likes: number;
+      views: number;
+    };
   }>;
   targetCount?: number;
   outDir: string;
@@ -82,7 +88,9 @@ export async function evaluateTweetRichnessWithVL(
   const candidateListText = candidates
     .map((c) => {
       const { text: safeText } = maskProfanity(c.text || '(Image/Video only)');
-      return `#${c.index} [${c.authorName} (${c.authorHandle})]:\n${safeText}`;
+      const m = c.metrics;
+      const metricsInfo = m ? ` [Views: ${m.views}, Likes: ${m.likes}, Reposts: ${m.reposts}, Replies: ${m.replies}]` : '';
+      return `#${c.index} [${c.authorName} (${c.authorHandle})]${metricsInfo}:\n${safeText}`;
     })
     .join('\n\n');
 

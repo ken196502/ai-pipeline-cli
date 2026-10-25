@@ -30,11 +30,11 @@ import {
   type PipelineStage,
   type StageResult,
   type StandardSummary,
-  type ViralPipelineInput,
-  type ViralPipelineOptions,
-  type ViralPipelineResult,
+  type FlowTutorPipelineInput,
+  type FlowTutorPipelineOptions,
+  type FlowTutorPipelineResult,
   type YtbCheckSummary,
-  ViralPipelineOptionsSchema,
+  FlowTutorPipelineOptionsSchema,
 } from './contracts.js';
 import {
   generateFinalReportJson,
@@ -55,10 +55,10 @@ import { createTutorialFromRun } from '../../tutorial/run.js';
 import type { TutorialGenerationSummary } from '../../tutorial/contracts.js';
 import { isAntiAbuseError } from '../../flow/client.js';
 
-import { DEFAULT_CREATIVE_EVALUATION_FOCUS, VIRAL_VIDEO_EVALUATION_REQUIREMENTS } from './evaluation-requirements.js';
+import { DEFAULT_FLOW_TUTOR_EVALUATION_FOCUS, FLOW_TUTOR_EVALUATION_REQUIREMENTS } from './evaluation-requirements.js';
 import { isFlowTargetingMismatch, tagTokenStageFailure } from './failure-policy.js';
 
-export const VIRAL_PIPELINE_STAGES: readonly PipelineStageDef[] = [
+export const FLOW_TUTOR_PIPELINE_STAGES: readonly PipelineStageDef[] = [
   { id: 'check-env', name: 'Environment Check', description: 'Check LLM, Chromium, yt-dlp, and ffmpeg' },
   { id: 'check-ytb', name: 'YouTube Auth Check', description: 'Verify YouTube cookies and authentication' },
   { id: 'browser-refresh', name: 'Browser Cookie Refresh', description: 'Refresh cookies via Chromium if needed', optional: true },
@@ -81,21 +81,21 @@ export const VIRAL_PIPELINE_STAGES: readonly PipelineStageDef[] = [
   { id: 'report', name: 'Generate Reports', description: 'Compile Markdown and JSON execution reports' },
 ] as const;
 
-export async function executeViralVideo(
-  options: ViralPipelineOptions,
+export async function executeFlowTutorVideo(
+  options: FlowTutorPipelineOptions,
   ctx: PipelineContext
-): Promise<ViralPipelineResult> {
+): Promise<FlowTutorPipelineResult> {
   const { runId, outDir, startTime, logger, stages, notify, recordStage } = ctx;
   const profileDir = resolveProfileDir(options.profileDir);
   await ctx.run.configure({
     ...options, profileDir,
-    evaluationFocus: options.evaluationFocus || DEFAULT_CREATIVE_EVALUATION_FOCUS,
-    evaluationRequirements: options.evaluationRequirements || VIRAL_VIDEO_EVALUATION_REQUIREMENTS,
+    evaluationFocus: options.evaluationFocus || DEFAULT_FLOW_TUTOR_EVALUATION_FOCUS,
+    evaluationRequirements: options.evaluationRequirements || FLOW_TUTOR_EVALUATION_REQUIREMENTS,
     skipMediaDownload: false,
   });
-  const storage = getPipelineStorage('ytbhot', options.storageDir);
+  const storage = getPipelineStorage('flowTutor', options.storageDir);
 
-  logger.info('Ytbhot viral video pipeline initialized', {
+  logger.info('FlowTutor viral video pipeline initialized', {
     runId,
     query: options.query,
     outDir,
@@ -109,7 +109,7 @@ export async function executeViralVideo(
   const stage1Start = Date.now();
   let envSummary: EnvCheckSummary;
   try {
-    envSummary = await checkEnvStage({ profileDir, storageDir: options.storageDir, pipelineId: 'ytbhot' }, logger);
+    envSummary = await checkEnvStage({ profileDir, storageDir: options.storageDir, pipelineId: 'flowTutor' }, logger);
     recordStage('check-env', 'completed', Date.now() - stage1Start, 'Environment checks passed', undefined, {
       ...envSummary,
     });
@@ -176,7 +176,7 @@ export async function executeViralVideo(
     );
   }
 
-  // Initialize persistent storage for ytbhot pipeline
+  // Initialize persistent storage for flowTutor pipeline
   await storage.init();
 
   if (ytbSummary.valid && stages['check-ytb']?.status === 'failed') {
@@ -736,7 +736,7 @@ export async function executeViralVideo(
   const completedAt = new Date().toISOString();
   const totalDurationMs = Date.now() - startTime;
 
-  const intermediateResult: ViralPipelineResult = {
+  const intermediateResult: FlowTutorPipelineResult = {
     runId,
     query: options.query,
     topic: standard.meta.topic,
@@ -781,7 +781,7 @@ export async function executeViralVideo(
       runId,
       profileDir,
     }).catch(() => {});
-    logger.info(`Updated ytbhot pipeline config Flow credits: ${finalCredits} credits remaining`);
+    logger.info(`Updated flowTutor pipeline config Flow credits: ${finalCredits} credits remaining`);
   }
 
   notify('complete', `Pipeline execution finished successfully in ${(totalDurationMs / 1000).toFixed(1)}s!`);
@@ -803,10 +803,10 @@ export async function executeViralVideo(
  * the round (and re-burning the same LLM/Flow tokens). Runs the real pipeline body
  * with a context Proxy so no stage-identification plumbing is needed in the body.
  */
-async function executeViralVideoWithFailurePolicy(
-  options: ViralPipelineOptions,
+async function executeFlowTutorVideoWithFailurePolicy(
+  options: FlowTutorPipelineOptions,
   ctx: PipelineContext
-): Promise<ViralPipelineResult> {
+): Promise<FlowTutorPipelineResult> {
   let activeStage: string | undefined;
   const trackedCtx = new Proxy(ctx, {
     get(target, prop, receiver) {
@@ -828,23 +828,23 @@ async function executeViralVideoWithFailurePolicy(
   }) as PipelineContext;
 
   try {
-    return await executeViralVideo(options, trackedCtx);
+    return await executeFlowTutorVideo(options, trackedCtx);
   } catch (err) {
     tagTokenStageFailure(err, activeStage, ErrorCodes.TOKEN_STAGE_FAILED);
     throw err;
   }
 }
 
-export const ytbhotPipeline: Pipeline<ViralPipelineInput, ViralPipelineResult> = {
-  id: 'ytbhot',
+export const flowTutorPipeline: Pipeline<FlowTutorPipelineInput, FlowTutorPipelineResult> = {
+  id: 'flowTutor',
   name: 'YouTube Hot Viral Video Generation',
   description: 'Autonomous end-to-end YouTube viral video discovery, research evaluation, and Veo generation',
-  schema: ViralPipelineOptionsSchema,
-  stages: VIRAL_PIPELINE_STAGES,
-  execute: async (rawOptions: ViralPipelineInput, customCtx?: any) => {
-    const validated = ViralPipelineOptionsSchema.parse(rawOptions) as ViralPipelineOptions;
-    const ctx = customCtx || (await createDefaultExecutionContext('ytbhot', validated.outDir, { config: validated }));
-    return executeViralVideoWithFailurePolicy(validated, ctx);
+  schema: FlowTutorPipelineOptionsSchema,
+  stages: FLOW_TUTOR_PIPELINE_STAGES,
+  execute: async (rawOptions: FlowTutorPipelineInput, customCtx?: any) => {
+    const validated = FlowTutorPipelineOptionsSchema.parse(rawOptions) as FlowTutorPipelineOptions;
+    const ctx = customCtx || (await createDefaultExecutionContext('flowTutor', validated.outDir, { config: validated }));
+    return executeFlowTutorVideoWithFailurePolicy(validated, ctx);
   },
   reports: {
     generateMarkdownReport: generateFinalReportMarkdown,
@@ -853,6 +853,5 @@ export const ytbhotPipeline: Pipeline<ViralPipelineInput, ViralPipelineResult> =
     printSummary: printExecutiveSummary,
   },
 };
-export const viralVideoPipeline = ytbhotPipeline;
 
-export const DEFAULT_VIRAL_QUERY = 'AI make Niche Viral Video';
+export const DEFAULT_FLOW_TUTOR_QUERY = 'AI make Niche Viral Video';

@@ -16,7 +16,10 @@ test('parseTopics parses semicolon-separated topics with whitespace and deduplic
   assert.deepEqual(parsed1, ['AI', 'new model', 'deepseek r1']);
 
   const parsed2 = parseTopics('');
-  assert.deepEqual(parsed2, ['new model']);
+  assert.deepEqual(parsed2, []);
+
+  const parsedWithDefault = parseTopics('', 'fallback topic');
+  assert.deepEqual(parsedWithDefault, ['fallback topic']);
 
   const parsed3 = parseTopics(['model A', 'model B', 'model A']);
   assert.deepEqual(parsed3, ['model A', 'model B']);

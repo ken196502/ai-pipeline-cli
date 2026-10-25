@@ -80,7 +80,10 @@ async function executeSingleQwen3TtsAttempt(
   const timeoutMs = options.timeoutMs ?? 300_000;
   const speaker = options.speaker || 'Ryan';
   const language = options.language || 'Auto';
-  const instruct = options.instruct !== undefined ? options.instruct : 'Speak in a calm, steady, professional documentary narrator tone.';
+  const instruct =
+    options.instruct !== undefined
+      ? options.instruct
+      : 'Speak with confidence, clarity, and crisp projection like an authoritative tech news anchor. Energetic, distinct, broadcast-ready delivery; strictly avoid whispering, mumbling, or overly quiet tone.';
   const modelSize = options.modelSize || '1.7B';
   const hfToken = options.token !== undefined ? (options.token ? options.token : undefined) : process.env.HF_TOKEN;
 

@@ -1,7 +1,7 @@
 import { formatEvaluationRequirements, type EvaluationRequirements } from '../../research/index.js';
 
-export const VIRAL_VIDEO_EVALUATION_REQUIREMENTS: EvaluationRequirements = {
-  pipelineId: 'viral-video-maker',
+export const FLOW_TUTOR_EVALUATION_REQUIREMENTS: EvaluationRequirements = {
+  pipelineId: 'flowTutor',
   coreObjective:
     'Evaluate video candidates for OUTSTANDING CREATIVE ENTERTAINMENT, DISTINCTIVE VISUAL STYLIST FLAIR, TOPIC UNIQUENESS & BLUE-OCEAN DIFFERENTIATION, DETAILED GENERATION GUIDANCE, RICH STORY SCRIPTS, CHARISMATIC CHARACTERS, AND HIGH GENERATIVE PROMPT RE-CREATIVITY.',
   requiredDimensions: [
@@ -94,6 +94,6 @@ export const VIRAL_VIDEO_EVALUATION_REQUIREMENTS: EvaluationRequirements = {
   ],
 };
 
-export const DEFAULT_CREATIVE_EVALUATION_FOCUS = formatEvaluationRequirements(VIRAL_VIDEO_EVALUATION_REQUIREMENTS);
+export const DEFAULT_FLOW_TUTOR_EVALUATION_FOCUS = formatEvaluationRequirements(FLOW_TUTOR_EVALUATION_REQUIREMENTS);
 
-export const VIRAL_EVALUATION_FOCUS = DEFAULT_CREATIVE_EVALUATION_FOCUS;
+export const FLOW_TUTOR_EVALUATION_FOCUS = DEFAULT_FLOW_TUTOR_EVALUATION_FOCUS;

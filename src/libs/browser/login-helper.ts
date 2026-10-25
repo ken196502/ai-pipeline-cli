@@ -1,6 +1,6 @@
 import pc from 'picocolors';
 import type { Page } from 'playwright-core';
-import { sendMsg } from '../../utils/send_msg.js';
+import { notifyError } from '../../utils/send_msg.js';
 import { loadEnvFile } from '../../utils/env.js';
 import { performDirectGoogleLogin } from './direct-login.js';
 
@@ -145,7 +145,7 @@ export async function notifyCaptchaWebhook(details: { url: string; reason?: stri
 
   console.log(pc.yellow(`\n${alertMsg}\n`));
   try {
-    await sendMsg(alertMsg);
+    await notifyError(alertMsg);
   } catch (err: any) {
     console.error(pc.yellow(`[webhook] Failed to send CAPTCHA notification: ${err?.message || err}`));
   }

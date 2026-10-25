@@ -647,6 +647,15 @@ export const PLAYER_JS = `
     });
   }
 
+  // Pre-collect candidate flash images
+  var flashImages = [];
+  assetList.forEach(function (a) {
+    if (a.kind === 'image' && (/^candidate-\d+/i.test(a.id) || /^cand-\d+/i.test(a.id))) {
+      var entry = mediaElements.get(a.id);
+      if (entry && entry.el) flashImages.push({ id: a.id, el: entry.el, label: a.label || '' });
+    }
+  });
+
   // Time & Duration calculations
   var playDur = clips.map(function (c) { return c.shots.length * shotDur; });
   var total = playDur.reduce(function (a, b) { return a + b; }, 0);
@@ -691,6 +700,7 @@ export const PLAYER_JS = `
   var bScene = mkBuf();
   var bGlow = mkBuf();
   var bCur = mkBuf(), bNxt = mkBuf(), bNxtBG = mkBuf();
+  var bCellA = mkBuf(), bCellB = mkBuf();
 
   var NA = W * H, NB = (W * H) >> 2;
   var noiseA = new Float32Array(NA), noiseB = new Float32Array(NB);
@@ -1084,6 +1094,95 @@ export const PLAYER_JS = `
     var id = typeof visualRef === 'string' ? visualRef : visualRef.assetId || visualRef.name || '';
     var label = typeof visualRef === 'object' ? visualRef.label : '';
 
+    // 0. Flash Component (Rapid cinematic candidate shot montage)
+    if (id === 'flash' || id.indexOf('flash:') === 0 || id === 'xhot-candidate-grid') {
+      var pool = (typeof flashImages !== 'undefined' && flashImages.length > 0) ? flashImages : [];
+      if (pool.length === 0) {
+        assetList.forEach(function (a) {
+          if (a.kind === 'image' && a.id !== 'xhot-candidate-grid') {
+            var ent = mediaElements.get(a.id);
+            if (ent && ent.el) pool.push({ id: a.id, el: ent.el, label: a.label || '' });
+          }
+        });
+      }
+
+      if (pool.length > 0) {
+        var interval = 0.20; // rapid cut every 200ms
+        var rawIdx = Math.floor(sl / interval);
+        var curIdx = rawIdx % pool.length;
+        var subProgress = (sl % interval) / interval;
+        var item = pool[curIdx];
+        var img = item.el;
+
+        var fAR = (img.naturalWidth && img.naturalHeight) ? (img.naturalWidth / img.naturalHeight) : (16 / 9);
+        var fw, fh;
+        if (fullscreen) {
+          var fFit = fitFullscreen(fAR);
+          fw = fFit.w; fh = fFit.h;
+        } else {
+          var maxFlashW = Math.min(W * 0.42, 680 * S);
+          var maxFlashH = H * 0.72;
+          if (fAR >= maxFlashW / maxFlashH) {
+            fw = maxFlashW;
+            fh = maxFlashW / fAR;
+          } else {
+            fh = maxFlashH;
+            fw = maxFlashH * fAR;
+          }
+        }
+
+        ctx.save();
+        ctx.translate(cx, cy);
+
+        var punchScale = 1.0 + (1 - easeOutCubic(subProgress)) * 0.04;
+        ctx.scale(punchScale, punchScale);
+
+        rr(ctx, -fw / 2, -fh / 2, fw, fh, 16 * S);
+        ctx.fillStyle = PAL.ink2;
+        ctx.fill();
+
+        ctx.save();
+        rr(ctx, -fw / 2, -fh / 2, fw, fh, 16 * S);
+        ctx.clip();
+        if (img.complete && img.naturalWidth > 0) {
+          ctx.drawImage(img, -fw / 2, -fh / 2, fw, fh);
+        } else {
+          ctx.fillStyle = 'rgba(21, 21, 23, 0.9)';
+          ctx.fillRect(-fw / 2, -fh / 2, fw, fh);
+        }
+
+        if (subProgress < 0.35) {
+          var cutAlpha = (1 - subProgress / 0.35) * 0.22;
+          ctx.fillStyle = 'rgba(255, 255, 255, ' + cutAlpha + ')';
+          ctx.fillRect(-fw / 2, -fh / 2, fw, fh);
+        }
+        ctx.restore();
+
+        ctx.strokeStyle = 'rgba(0, 240, 255, 0.6)';
+        ctx.lineWidth = 2 * S;
+        rr(ctx, -fw / 2, -fh / 2, fw, fh, 16 * S);
+        ctx.stroke();
+
+        ctx.save();
+        var badgeText = 'FLASH · ' + String(curIdx + 1).padStart(2, '0') + '/' + String(pool.length).padStart(2, '0');
+        ctx.font = '700 ' + Math.round(12 * S) + 'px ' + FONT;
+        var btw = ctx.measureText(badgeText).width + 20 * S;
+        rr(ctx, fw / 2 - btw - 14 * S, -fh / 2 + 14 * S, btw, 24 * S, 12 * S);
+        ctx.fillStyle = 'rgba(11, 15, 25, 0.88)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(0, 240, 255, 0.7)';
+        ctx.stroke();
+        ctx.fillStyle = '#00F0FF';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(badgeText, fw / 2 - btw / 2 - 14 * S, -fh / 2 + 26 * S);
+        ctx.restore();
+
+        ctx.restore();
+        return;
+      }
+    }
+
     // 1. Chart keyword
     if (id === 'bars' || id === 'line' || id === 'donut') {
       drawChart(ctx, { chart: id, data: visualRef.data, label: label }, cx, cy, 320 * S);
@@ -1185,17 +1284,21 @@ export const PLAYER_JS = `
     // 3. Screenshot / Keyframe Image reference
     if (entry && entry.kind === 'image') {
       var img = entry.el;
-      var iw = 440 * S, ih = 780 * S;
-      if (img.naturalWidth && img.naturalHeight && img.naturalWidth > img.naturalHeight) {
-        iw = 700 * S; ih = 400 * S;
-      }
+      var actualAR = (img.naturalWidth && img.naturalHeight) ? (img.naturalWidth / img.naturalHeight) : 1.0;
+      var iw, ih;
       if (fullscreen) {
-        var imgAR = (img.naturalWidth && img.naturalHeight) ? img.naturalWidth / img.naturalHeight : (iw / ih);
-        var iFit = fitFullscreen(imgAR);
+        var iFit = fitFullscreen(actualAR);
         iw = iFit.w; ih = iFit.h;
       } else {
-        var imageFit = Math.min(1, W * 0.34 / iw, H * 0.74 / ih);
-        iw *= imageFit; ih *= imageFit;
+        var maxBoxW = Math.min(W * 0.42, 740 * S);
+        var maxBoxH = H * 0.78;
+        if (actualAR >= maxBoxW / maxBoxH) {
+          iw = maxBoxW;
+          ih = maxBoxW / actualAR;
+        } else {
+          ih = maxBoxH;
+          iw = maxBoxH * actualAR;
+        }
       }
       ctx.save();
       ctx.translate(cx, cy);
@@ -1292,6 +1395,54 @@ export const PLAYER_JS = `
     var tl = elemTransform('L', tf.enterK, tf.exitK);
     var tr = elemTransform('R', tf.enterK, tf.exitK);
     var blockAlpha = tl.alpha;
+
+    var isFlashShot = entries.some(function (e) {
+      var ref = e[1];
+      var refId = typeof ref === 'string' ? ref : (ref ? ref.assetId || ref.name : '');
+      return refId === 'flash' || refId.indexOf('flash:') === 0 || refId === 'xhot-candidate-grid';
+    });
+
+    if (isFlashShot) {
+      var flashSlotDur = (VOICE && shot.vDur) ? shot.vDur : shotDur;
+      var fcx = W / 2, fcy = H / 2;
+      ctx.save();
+      ctx.globalAlpha *= blockAlpha * tr.alpha;
+      colScale(ctx, fcx, fcy, tr.scale, tr.x);
+
+      // Flash Component renders full screen cinema contain
+      drawVisualCell(ctx, 'flash', fcx, fcy, sl, flashSlotDur, syncPromiseQueue, true);
+      ctx.restore();
+
+      // Sleek floating subtitle banner for the active spoken sentence
+      var activeSentence = (shot.narration && shot.narration[jActive]) || entries[jActive][0] || '';
+      if (activeSentence) {
+        var bannerY = H - 54 * S;
+        ctx.save();
+        ctx.globalAlpha *= blockAlpha;
+        ctx.font = '600 ' + Math.max(13, Math.round(18 * S)) + 'px ' + FONT;
+        var bw = ctx.measureText(activeSentence).width + 64 * S;
+        var bh = 38 * S;
+        rr(ctx, W / 2 - bw / 2, bannerY - bh / 2, bw, bh, 19 * S);
+        ctx.fillStyle = 'rgba(11, 15, 25, 0.92)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(0, 240, 255, 0.6)';
+        ctx.lineWidth = 1.5 * S;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(W / 2 - bw / 2 + 20 * S, bannerY, 4 * S, 0, Math.PI * 2);
+        ctx.fillStyle = '#00F0FF';
+        ctx.fill();
+
+        ctx.fillStyle = PAL.bone;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(activeSentence, W / 2 - bw / 2 + 32 * S, bannerY);
+        ctx.restore();
+      }
+
+      return;
+    }
 
     var isFinalShowcase = entries.some(function (e) {
       var ref = e[1];
@@ -1478,7 +1629,7 @@ export const PLAYER_JS = `
       ctx.font = weight + ' ' + Math.round(fs) + 'px ' + FONT;
       var extraGap = Math.max(0, tokenize(text).length - 1) * lineGap(text);
       var w = ctx.measureText(text).width + extraGap;
-      var MAX_END = W * 0.5 - 30 * S;
+      var MAX_END = Math.min(W * 0.48, W * 0.5 - 30 * S);
       if (xText + indent + w > MAX_END) {
         fs = fs * (MAX_END - xText - indent - extraGap) / (w - extraGap);
         ctx.font = weight + ' ' + Math.round(fs) + 'px ' + FONT;
@@ -1563,16 +1714,22 @@ export const PLAYER_JS = `
 
     var slotDur = (VOICE && shot.vDur) ? shot.vDur : shotDur;
     if (prev != null) {
+      bCellA.x.clearRect(0, 0, W, H);
+      drawVisualCell(bCellA.x, prev, rcx, rcy, sl, slotDur, syncPromiseQueue);
+
+      bCellB.x.clearRect(0, 0, W, H);
+      drawVisualCell(bCellB.x, cur, rcx, rcy, sl, slotDur, syncPromiseQueue);
+
       ctx.save();
       ctx.globalAlpha *= (1 - k);
       ctx.translate(160 * S * easeInOutCubic(k), 0);
-      drawVisualCell(ctx, prev, rcx, rcy, sl, slotDur, syncPromiseQueue);
+      ctx.drawImage(bCellA.c, 0, 0, W, H);
       ctx.restore();
 
       ctx.save();
       ctx.globalAlpha *= k;
       ctx.translate(160 * S * (1 - easeOutBack(k)), 0);
-      drawVisualCell(ctx, cur, rcx, rcy, sl, slotDur, syncPromiseQueue);
+      ctx.drawImage(bCellB.c, 0, 0, W, H);
       ctx.restore();
     } else {
       var a = (jActive === 0) ? clamp((sl - lineStartRel(0)) / 0.4, 0, 1) : 1;

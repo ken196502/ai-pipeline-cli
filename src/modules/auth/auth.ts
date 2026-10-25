@@ -555,7 +555,8 @@ async function recoverWithInteractiveLogin(
     return { loggedIn: true, page: session.page, session, recovered: true, reason: diagnosis.reason };
   }
 
-  await sendMsg(
+  // Human intervention required → alert both Telegram and Pi.
+  await notifyError(
     `🔓 【X 登录需要人工介入】已拉起有头 Chromium 窗口（profile 已归档重置${seeded ? '，系统会话已验证' : ''}）。\n` +
       `• 触发原因: ${diagnosis.reason}\n` +
       `• 请在窗口中手动完成 X 登录/二次验证（含验证码）\n` +

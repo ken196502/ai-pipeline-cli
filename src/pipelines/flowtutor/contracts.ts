@@ -41,7 +41,7 @@ export type PipelineStage =
 import type { StageResult } from '../../run/contracts.js';
 export type { StageResult, StageStatus } from '../../run/contracts.js';
 
-export const ViralPipelineOptionsSchema = z.object({
+export const FlowTutorPipelineOptionsSchema = z.object({
   query: z.string().min(1, 'Search query or viral topic is required').default('AI make Niche Viral Video'),
   topic: z.string().optional(),
   standardPath: z.string().optional(),
@@ -105,11 +105,11 @@ export const ViralPipelineOptionsSchema = z.object({
   outDir: z.string().optional(),
 });
 
-export type ViralPipelineOptions = z.infer<typeof ViralPipelineOptionsSchema> & {
+export type FlowTutorPipelineOptions = z.infer<typeof FlowTutorPipelineOptionsSchema> & {
   onProgress?: (stage: PipelineStage, message: string, data?: unknown) => void;
 };
 
-export type ViralPipelineInput = z.input<typeof ViralPipelineOptionsSchema> & {
+export type FlowTutorPipelineInput = z.input<typeof FlowTutorPipelineOptionsSchema> & {
   onProgress?: (stage: PipelineStage, message: string, data?: unknown) => void;
 };
 import type { EnvCheckSummary, YtbCheckSummary } from '../core/stages.js';
@@ -216,7 +216,7 @@ export interface FlowGenerationSummary {
   }>;
 }
 
-export interface ViralPipelineResult {
+export interface FlowTutorPipelineResult {
   runId: string;
   query: string;
   topic: string;

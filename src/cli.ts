@@ -11,7 +11,8 @@
 import { Command } from 'commander';
 import pc from 'picocolors';
 import { attachXHotOptions, handleXHotCommand } from './pipelines/xhot/cli.js';
-import { attachViralOptions as attachYtbHotOptions, handleViralCommand as handleYtbHotCommand } from './pipelines/ytbhot/cli.js';
+import { attachFlowTutorOptions, handleFlowTutorCommand } from './pipelines/flowtutor/cli.js';
+import { PIPELINE_CONFLICT_CODE, PIPELINE_CONFLICT_EXIT_CODE } from './pipelines/core/lock.js';
 
 /**
  * Normalize em-dash/en-dash flags (e.g. —24h or –topics copied from chat/docs)
@@ -44,17 +45,17 @@ async function main() {
     await handleXHotCommand(query, opts);
   });
 
-  // ── Ytbhot (YouTube Viral Video Maker) Sub-command ────────────
-  const ytbhotCmd = program
-    .command('ytbhot')
-    .alias('viral')
-    .alias('viral-video-maker')
-    .description('Ytbhot: YouTube viral video research evaluation, Flow Veo synthesis, and AI tutorial video');
+  // ── flowTutor (YouTube AI video tutorial research) Sub-command ─
+  const flowTutorCmd = program
+    .command('flowTutor')
+    .description(
+      'FlowTutor: YouTube AI video tutorial research, Flow Veo synthesis, and tutorial video'
+    );
 
-  attachYtbHotOptions(ytbhotCmd);
+  attachFlowTutorOptions(flowTutorCmd);
 
-  ytbhotCmd.action(async (query: string, opts: any) => {
-    await handleYtbHotCommand(query, opts);
+  flowTutorCmd.action(async (query: string, opts: any) => {
+    await handleFlowTutorCommand(query, opts);
   });
 
   // ── Default action (no sub-command) ───────────────────────────
@@ -62,12 +63,12 @@ async function main() {
     console.log(pc.bold(pc.cyan('\n🚀 AIGC Pipeline Platform v2.0.0\n')));
     console.log('Available pipelines:\n');
     console.log(`  ${pc.bold('xhot')}      Xhot Trending Video — discover hot topics on X, evaluate, harvest, and render explainer video`);
-    console.log(`  ${pc.bold('ytbhot')}    YouTube Hot Video Maker — YouTube candidate research, Flow Veo synthesis, and explainer video`);
+    console.log(`  ${pc.bold('flowTutor')}  YouTube AI video tutorial research, Flow Veo synthesis, and tutorial video`);
     console.log();
     console.log(`Run ${pc.cyan('aigc <pipeline> --help')} for pipeline-specific options.\n`);
     console.log('Examples:');
     console.log(`  ${pc.dim('$')} aigc xhot "new model"`);
-    console.log(`  ${pc.dim('$')} aigc ytbhot "AI make Niche Viral Video"`);
+    console.log(`  ${pc.dim('$')} aigc flowTutor "AI make Niche Viral Video"`);
     console.log(`  ${pc.dim('$')} aigc xhot --topics "AI;deepseek r1" --24h\n`);
   });
 
@@ -98,6 +99,13 @@ if (
   scriptName === 'aigc'
 ) {
   main().catch((err) => {
+    // Concurrent pipelines would corrupt the shared Chromium profile: report the
+    // conflict plainly (no stack, no alerts) and exit with a dedicated code.
+    if (err?.code === PIPELINE_CONFLICT_CODE || err?.name === 'PipelineConflictError') {
+      console.error(pc.red(err.message));
+      process.exitCode = PIPELINE_CONFLICT_EXIT_CODE;
+      return;
+    }
     console.error(err);
     process.exit(1);
   });

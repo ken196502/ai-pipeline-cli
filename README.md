@@ -7,6 +7,7 @@
 | Pipeline ID | 名称 | 描述 |
 |---|---|---|
 | `xhot` | Xhot Trending Video | X (Twitter) 热点追踪 → VL 评估 → 素材采集 → 解说视频自动渲染 |
+| `flowTutor` | FlowTutor | YouTube AI 教程视频搜索 → VL 封面评估 → prompt 提取 → Flow Veo 批量合成 → 解说视频 |
 
 > 更多流水线（如 YouTube Shorts 自动化、Reddit 热帖视频等）可通过 `src/pipelines/<id>/` 目录结构快速接入。
 
@@ -54,6 +55,7 @@ AIGC-pipeline/
 │   │   ├── core/                              # 通用 Pipeline 框架
 │   │   │   ├── contracts.ts                   # Pipeline / PipelineStageDef / Pipeline24hOptions 类型定义
 │   │   │   ├── context.ts                     # PipelineExecutionContext 运行时上下文
+│   │   │   ├── lock.ts                        # 并发冲突检测（运行锁 + 存活进程扫描）
 │   │   │   ├── registry.ts                    # PipelineRegistry 注册中心 (含 run24h)
 │   │   │   └── runner.ts                      # 24H 连续调度器 (ContinuousTopicScheduler / runPipeline24h)
 │   │   ├── xhot/                              # 🔥 Xhot 7 阶段全流程流水线
@@ -113,6 +115,26 @@ PI_TELEGRAM_BOT_PORTS=main:3094,inspilot:3095
 
 ## 🚀 常用命令
 
+### 0. 并发冲突保护（启动即拒绝）
+
+所有 pipeline 共用同一个持久化 Chromium profile（`./.chromium-profile`，CDP 9222），并行运行会互相接管浏览器、覆盖 cookie。因此 CLI **在启动第一步就检查是否已有 pipeline 在跑**，有则直接报错退出，不打印 banner、不启动浏览器、不发任何通知。
+
+```text
+⛔ Pipeline conflict detected — refusing to start.
+
+  Requested:        flowTutor
+  Already running:  xhot (pid 65995)
+  Started at:       2026-10-25T07:21:01.365Z
+  Command:          /usr/bin/node .../src/cli.ts xhot guard e2e
+  Lock file:        /mnt/share/VM/AIGC-pipeline/.tmp/pipeline.lock
+```
+
+- 退出码：`2`（`PIPELINE_CONFLICT`），便于脚本判定。
+- 判据一：运行锁 `<projectRoot>/.tmp/pipeline.lock`（原子创建，退出/`exit` 钩子自动清理；崩溃残留的锁会因 pid 已死而被下一次启动接管）。
+- 判据二：进程表扫描，用于捕捉没有锁的运行者（旧版本、别的终端手工启动）。只认 `node`/`tsx` 进程 + 入口必须解析到本项目的 `src/cli.ts`/`dist/cli.js`，因此 `bash -c`、`tmux send-keys`、`grep`、`npm` 包装进程不会被误判。
+- 24H Runner 在整个生命周期（含 sleep 阶段）持锁，因此运行中的 `--24h` 循环会阻止其它 pipeline 启动。
+- 需要并行时，必须给其中一条 pipeline 独立的 `CHROMIUM_PROFILE_DIR`（并单独登录），不提供 `--force` 之类的绕过开关。
+
 ### 1. 运行测试
 ```bash
 # 运行全部测试（模块 + 流水线 + 调度器）
@@ -139,23 +161,30 @@ npm run module:explainer-video -- path/to/eval-result.json path/to/harvest-resul
 
 ### 3. 运行 Xhot 流水线
 
-```bash
-# 通过 aigc 多命令 CLI
-npm run aigc -- xhot "new model"
-npm run aigc -- xhot --dry-run
+> ⚠️ **Topic 配置说明**：Xhot 流水线不使用任何硬编码默认 topic。每次执行必须通过 CLI 指定 topic，或者在环境变量/`.env` 中配置 `XHOT_TOPICS` / `XHOT_TOPIC`。若未配置任何 topic，流水线将直接报错退出。
 
-# 直接快捷方式
-npm run xhot -- "new model"
+```bash
+# 通过 CLI 传参指定 topic
+npm run aigc -- xhot "AI agents"
+npm run aigc -- xhot --dry-run "AI agents"
+
+# 快捷方式
+npm run xhot -- "AI agents"
 npm run xhot -- "deepseek r1" --dry-run
 
 # 多话题单次顺序执行（分号分隔）
-npm run aigc -- xhot --topics "AI;new model;deepseek r1"
+npm run aigc -- xhot --topics "AI;robotics;deepseek r1"
 
 # 24H 连续循环模式（顺序执行，永不停止，每话题 24 小时默认最多 1 次）
-npm run aigc -- xhot --topics "AI;new model;deepseek r1" --24h
+npm run aigc -- xhot --topics "AI;robotics;deepseek r1" --24h
 
 # 24H 连续循环模式（自定义限制：每话题 24 小时最多 2 次）
-npm run aigc -- xhot --topics "AI;new model;deepseek r1" --24h 2
+npm run aigc -- xhot --topics "AI;robotics;deepseek r1" --24h 2
+
+# 通过环境变量配置（在 .env 中设置 XHOT_TOPICS 或 XHOT_TOPIC）
+# .env:
+#   XHOT_TOPICS="AI;robotics;deepseek r1"
+npm run aigc -- xhot --24h
 
 # 自定义参数
 npm run aigc -- xhot "claude 3.7" --candidate-count 12 --max-age-hours 48 --headed
@@ -173,7 +202,23 @@ npm run aigc -- --help
 npm run aigc -- xhot --help
 ```
 
-### 5. 编译构建
+### 5. 运行 flowTutor
+
+```bash
+# 默认查询（与旧 ytbhot 一致）
+npm run pipeline:flowTutor
+
+# 指定查询
+npx tsx src/cli.ts flowTutor "AI make Niche Viral Video"
+
+# 先只跑到 Flow 生成前，人工确认脚本与 prompt
+npx tsx src/cli.ts flowTutor "AI make Niche Viral Video" --stop-before-gen
+
+# 跳过 Flow 生成（只做搜索/评估/prompt 提取/报告）
+npx tsx src/cli.ts flowTutor "AI make Niche Viral Video" --skip-flow-gen
+```
+
+### 6. 编译构建
 ```bash
 npm run build
 ```
