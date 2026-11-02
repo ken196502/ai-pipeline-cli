@@ -1,9 +1,13 @@
 /**
  * Sends a notification message via the webhook service.
- * Strictly enforces configuration from environment variables without hidden fallbacks.
+ *
+ * Credentials (`WEBHOOK_URL`, `WEBHOOK_TOKEN`, `NOTIFY_TO`) come from the
+ * environment; the delivery *bot* is project-level configuration
+ * (`NOTIFY_PROJECT_DEFAULTS`) overridable per call. See `notify-defaults.ts`.
  */
 import { loadEnvFile } from '../env.js';
 import pc from 'picocolors';
+import { NOTIFY_PROJECT_DEFAULTS, type NotifyProjectDefaults } from './notify-defaults.js';
 
 export interface WebhookConfig {
   webhookUrl: string;
@@ -11,8 +15,11 @@ export interface WebhookConfig {
   notifyTo: string;
   /**
    * Bot name for the multi-bot gateway (pi-telegram-server `TELEGRAM_BOTS`).
-   * The gateway refuses requests without it, so it is required here as well:
-   * it comes from `PI_TELEGRAM_BOT` only — no alias, no default, no guessing.
+   *
+   * Resolved from the caller's parameter first, then the CLI `--notify` target,
+   * then `NOTIFY_PROJECT_DEFAULTS.bot`. It is never read from the environment:
+   * a stale `PI_TELEGRAM_BOT` in a tmux session already routed alerts to the
+   * wrong bot once.
    */
   bot: string;
 }
@@ -25,87 +32,182 @@ export interface WebhookSendResult {
 }
 
 /**
- * Explicit bot → Pi inbound port mapping, parsed from `PI_TELEGRAM_BOT_PORTS`
- * (e.g. `main:3094,inspilot:3095`). Used to catch a bot whose alerts would be
- * injected into the wrong Pi session. When the variable is unset the check is
- * skipped entirely — the mapping is never guessed.
+ * Explicit bot → Pi inbound port mapping.
+ *
+ * Project-level (`NOTIFY_PROJECT_DEFAULTS.botPorts`), used to catch a bot whose
+ * alerts would be injected into the wrong Pi session. A port is never guessed.
  */
-export type BotPortMap = Record<string, number>;
+export type BotPortMap = Readonly<Record<string, number>>;
 
-/** Parses `PI_TELEGRAM_BOT_PORTS`; returns undefined when unset or blank. */
-export function parseBotPortMap(raw: string | undefined): BotPortMap | undefined {
-  if (raw === undefined) return undefined;
-  const trimmed = raw.trim();
-  if (!trimmed) return undefined;
-
-  const map: BotPortMap = {};
-  for (const entry of trimmed.split(',')) {
-    const item = entry.trim();
-    if (!item) {
-      throw new Error(`Invalid PI_TELEGRAM_BOT_PORTS: empty entry in "${trimmed}"`);
-    }
-    const sep = item.indexOf(':');
-    if (sep <= 0 || sep === item.length - 1) {
-      throw new Error(`Invalid PI_TELEGRAM_BOT_PORTS entry "${item}"; expected <bot>:<port>`);
-    }
-    const name = item.slice(0, sep).trim().toLowerCase();
-    const portText = item.slice(sep + 1).trim();
-    if (!name) {
-      throw new Error(`Invalid PI_TELEGRAM_BOT_PORTS entry "${item}"; bot name is required`);
-    }
-    if (!/^\d+$/.test(portText)) {
-      throw new Error(`Invalid PI_TELEGRAM_BOT_PORTS entry "${item}"; port must be an integer`);
-    }
-    const port = Number(portText);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) {
-      throw new Error(`Invalid PI_TELEGRAM_BOT_PORTS entry "${item}"; port out of range 1-65535`);
-    }
-    if (map[name] !== undefined) {
-      throw new Error(`Invalid PI_TELEGRAM_BOT_PORTS: duplicate bot "${name}"`);
-    }
-    map[name] = port;
+/**
+ * Fails when `bot` is not part of the project bot map (a typo, not a guess).
+ */
+export function assertKnownBot(bot: string, map: BotPortMap = NOTIFY_PROJECT_DEFAULTS.botPorts): void {
+  const name = bot.trim().toLowerCase();
+  if (map[name] === undefined) {
+    throw new Error(
+      `Bot "${bot}" is not part of the project bot map (known bots: ${Object.keys(map).join(', ')}); ` +
+        'see src/utils/notify-defaults.ts'
+    );
   }
-  return map;
-}
-
-/** Reads `PI_TELEGRAM_BOT_PORTS` from the environment (after loading .env). */
-export function getBotPortMap(): BotPortMap | undefined {
-  loadEnvFile();
-  return parseBotPortMap(process.env.PI_TELEGRAM_BOT_PORTS);
 }
 
 /**
  * Fails when `bot` is unknown to the mapping, or when `inboundUrl` does not
- * point at the port declared for that bot. No-op when no mapping is configured.
+ * point at the port declared for that bot.
  */
 export function assertBotPortConsistency(
   bot: string,
   inboundUrl: string,
-  map: BotPortMap | undefined
+  map: BotPortMap = NOTIFY_PROJECT_DEFAULTS.botPorts
 ): void {
-  if (!map) return;
+  assertKnownBot(bot, map);
 
-  const name = bot.trim().toLowerCase();
-  const expected = map[name];
-  if (expected === undefined) {
-    throw new Error(
-      `PI_TELEGRAM_BOT="${bot}" is not listed in PI_TELEGRAM_BOT_PORTS (known bots: ${Object.keys(map).join(', ')})`
-    );
-  }
-
+  const expected = map[bot.trim().toLowerCase()];
   let parsed: URL;
   try {
     parsed = new URL(inboundUrl);
   } catch {
-    throw new Error(`PI_INBOUND_URL is not a valid URL: ${inboundUrl}`);
+    throw new Error(`Pi inbound URL is not a valid URL: ${inboundUrl}`);
   }
   const actualPort = parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80;
   if (actualPort !== expected) {
     throw new Error(
-      `Bot/port mismatch: PI_TELEGRAM_BOT="${bot}" must post to port ${expected}, ` +
-        `but PI_INBOUND_URL points at port ${actualPort} (${inboundUrl})`
+      `Bot/port mismatch: bot "${bot}" must post to port ${expected}, ` +
+        `but the inbound URL points at port ${actualPort} (${inboundUrl})`
     );
   }
+}
+
+/* ── notify target override (--notify / --notify-error) ─────────────────── */
+
+/**
+ * A resolved delivery target: the gateway bot name plus the Pi inbound endpoint
+ * that belongs to that bot.
+ *
+ * Both halves come from the project bot map, so a target can never point at a
+ * bot on the wrong port — the failure mode that silently delivered alerts into
+ * the wrong Pi session.
+ */
+export interface NotifyTarget {
+  bot: string;
+  inboundUrl: string;
+}
+
+export type NotifyTargetKind = 'result' | 'error';
+
+/**
+ * Parses a `--notify` / `--notify-error` value: `inspilot` or `main,inspilot`.
+ *
+ * Empty entries and embedded whitespace are typos, not something to skip: a
+ * typo here routes a run's output to the wrong chat, so it fails loudly.
+ */
+export function parseNotifyTargetList(raw: string | undefined): string[] {
+  if (raw === undefined) return [];
+  if (!raw.trim()) {
+    throw new Error('--notify must not be blank; pass a bot name, e.g. "inspilot" or "main,inspilot"');
+  }
+
+  const bots: string[] = [];
+  for (const entry of raw.split(',')) {
+    const name = entry.trim().toLowerCase();
+    if (!name) {
+      throw new Error(`--notify has an empty entry in "${raw}"; expected <bot>[,<bot>...]`);
+    }
+    if (/\s/.test(name)) {
+      throw new Error(`--notify entry "${name}" must not contain whitespace (use commas: main,inspilot)`);
+    }
+    if (!bots.includes(name)) bots.push(name);
+  }
+  return bots;
+}
+
+/** Swaps only the port of `inboundUrl`, keeping scheme/host/path intact. */
+export function withInboundPort(inboundUrl: string, port: number): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(inboundUrl);
+  } catch {
+    throw new Error(`Pi inbound URL is not a valid URL: ${inboundUrl}`);
+  }
+  parsed.port = String(port);
+  return parsed.toString();
+}
+
+/**
+ * Resolves bot names into `{ bot, inboundUrl }` pairs.
+ *
+ * `map` / `inboundUrl` default to the project-level configuration; they are
+ * parameters (not env) so a test or a future pipeline can drive them directly.
+ * An unknown bot is a hard error: a typo must not silently drop an alert.
+ */
+export function resolveNotifyTargets(config: {
+  bots: string[];
+  inboundUrl?: string;
+  map?: BotPortMap;
+}): NotifyTarget[] {
+  const { bots } = config;
+  if (bots.length === 0) return [];
+
+  const map = config.map ?? NOTIFY_PROJECT_DEFAULTS.botPorts;
+  const base = (config.inboundUrl ?? NOTIFY_PROJECT_DEFAULTS.inboundBaseUrl).trim();
+  if (!base) {
+    throw new Error('Cannot resolve notification target(s): the inbound base URL is empty');
+  }
+
+  const targets: NotifyTarget[] = [];
+  for (const bot of bots) {
+    const port = map[bot];
+    if (port === undefined) {
+      throw new Error(
+        `Bot "${bot}" is not part of the project bot map ` +
+          `(known bots: ${Object.keys(map).join(', ')}); see src/utils/notify-defaults.ts`
+      );
+    }
+    targets.push({ bot, inboundUrl: withInboundPort(base, port) });
+  }
+  return targets;
+}
+
+/** Explicit targets for the current process; empty means "project default". */
+let activeResultTargets: NotifyTarget[] = [];
+let activeErrorTargets: NotifyTarget[] = [];
+
+/**
+ * Applies `--notify` / `--notify-error` for the rest of the process.
+ *
+ * Parameters only — nothing is read from the environment.
+ * `--notify-error` defaults to the `--notify` targets: the operator asked for a
+ * destination, and silently keeping errors elsewhere would defeat the point.
+ */
+export function setNotifyTargets(input: { result?: string; error?: string }): void {
+  const result = resolveNotifyTargets({ bots: parseNotifyTargetList(input.result) });
+  const error =
+    input.error === undefined
+      ? result
+      : resolveNotifyTargets({ bots: parseNotifyTargetList(input.error) });
+
+  activeResultTargets = result;
+  activeErrorTargets = error;
+}
+
+export function getNotifyTargets(kind: NotifyTargetKind = 'result'): NotifyTarget[] {
+  return kind === 'error' ? activeErrorTargets : activeResultTargets;
+}
+
+/** Forgets the programmatic override: the project default applies again. */
+export function clearNotifyTargets(): void {
+  activeResultTargets = [];
+  activeErrorTargets = [];
+}
+
+/** Human-readable target list for logs (e.g. `inspilot (http://…:3095/…)`). */
+export function describeNotifyTargets(kind: NotifyTargetKind = 'result'): string {
+  const targets = getNotifyTargets(kind);
+  if (targets.length === 0) {
+    return `project-default (${NOTIFY_PROJECT_DEFAULTS.bot})`;
+  }
+  return targets.map((t) => `${t.bot} (${t.inboundUrl})`).join(', ');
 }
 
 /**
@@ -142,22 +244,18 @@ export function getWebhookConfig(override?: Partial<WebhookConfig>): WebhookConf
     throw new Error('Missing required environment variable: NOTIFY_TO must be defined');
   }
 
-  const bot = override?.bot ?? process.env.PI_TELEGRAM_BOT;
+  // Caller parameter → `--notify` target → project default. Never env.
+  const activeBot = getNotifyTargets('result')[0]?.bot;
+  const bot = override?.bot ?? activeBot ?? NOTIFY_PROJECT_DEFAULTS.bot;
   if (!bot || !bot.trim()) {
     throw new Error(
-      'Missing required environment variable: PI_TELEGRAM_BOT must be defined ' +
-        '(the webhook gateway runs multiple bots and rejects requests without an explicit bot name)'
+      'Notification bot is blank: pass a non-empty bot name (e.g. { bot: "inspilot" }) ' +
+        'or omit it to use the project default'
     );
   }
 
-  // When an explicit bot→port map is configured, an unknown bot is a typo, not a guess.
-  const botPorts = parseBotPortMap(process.env.PI_TELEGRAM_BOT_PORTS);
-  if (botPorts && botPorts[bot.trim().toLowerCase()] === undefined) {
-    throw new Error(
-      `PI_TELEGRAM_BOT="${bot.trim()}" is not listed in PI_TELEGRAM_BOT_PORTS ` +
-        `(known bots: ${Object.keys(botPorts).join(', ')})`
-    );
-  }
+  // A bot outside the project map is a typo, not something to guess around.
+  assertKnownBot(bot.trim());
 
   return {
     webhookUrl: webhookUrl.trim(),
@@ -183,29 +281,27 @@ export function isTestEnvironment(): boolean {
 }
 
 /**
- * Sends a notification message via the webhook endpoint.
- * When `attachment` is provided, the gateway delivers the referenced file as
- * a document and uses `message` as its caption.
- * Throws an explicit Error if delivery fails or if response status is not ok.
+ * Builds the webhook configs for one send.
+ *
+ * • explicit caller bot → exactly that bot (tests / dedicated channels);
+ * • `--notify` targets → one config per target (fan-out);
+ * • otherwise → the single project-default channel.
  */
-export async function sendMsg(
+function resolveWebhookConfigs(override?: Partial<WebhookConfig>): WebhookConfig[] {
+  if (override?.bot) return [getWebhookConfig(override)];
+
+  const targets = getNotifyTargets('result');
+  if (targets.length === 0) return [getWebhookConfig(override)];
+
+  return targets.map((target) => getWebhookConfig({ ...override, bot: target.bot }));
+}
+
+/** POSTs one message to one webhook target. Throws on any non-OK answer. */
+async function postWebhook(
+  config: WebhookConfig,
   message: string,
-  overrideConfig?: Partial<WebhookConfig>,
   attachment?: WebhookAttachment
 ): Promise<WebhookSendResult> {
-  const config = getWebhookConfig(overrideConfig);
-
-  // Test runs must not page a human. An explicit overrideConfig means the test
-  // is driving its own mock server, which is allowed.
-  if (isTestEnvironment() && !overrideConfig?.webhookUrl) {
-    console.log(pc.dim(`[send_msg] Suppressed real Telegram message in test environment: ${message.slice(0, 80)}`));
-    return { ok: true, to: config.notifyTo, raw: { suppressed: true } };
-  }
-
-  if (attachment && (!attachment.filePath || !attachment.filePath.trim())) {
-    throw new Error('[send_msg] attachment.filePath must be a non-empty string');
-  }
-
   const body: Record<string, string> = { to: config.notifyTo, message, bot: config.bot };
   if (attachment) {
     body.filePath = attachment.filePath.trim();
@@ -225,7 +321,7 @@ export async function sendMsg(
     });
   } catch (netErr: any) {
     throw new Error(
-      `[send_msg] Network request failed while sending to webhook ${config.webhookUrl}: ${netErr.message}`
+      `Network request failed while sending to webhook ${config.webhookUrl} (bot=${config.bot}): ${netErr.message}`
     );
   }
 
@@ -234,10 +330,10 @@ export async function sendMsg(
   if (!res.ok) {
     const hint =
       res.status === 400 && /multiple bots configured/i.test(bodyText)
-        ? ` (gateway does not know bot "${config.bot}": check PI_TELEGRAM_BOT against TELEGRAM_BOTS)`
+        ? ` (gateway does not know bot "${config.bot}": check TELEGRAM_BOTS in the gateway)`
         : '';
     throw new Error(
-      `[send_msg] Webhook responded with error HTTP ${res.status}: ${bodyText || res.statusText}${hint}`
+      `Webhook responded with error HTTP ${res.status}: ${bodyText || res.statusText}${hint}`
     );
   }
 
@@ -256,6 +352,60 @@ export async function sendMsg(
   };
 }
 
+/**
+ * Sends a notification message via the webhook endpoint.
+ * When `attachment` is provided, the gateway delivers the referenced file as
+ * a document and uses `message` as its caption.
+ * Throws an explicit Error if delivery fails or if response status is not ok.
+ */
+export async function sendMsg(
+  message: string,
+  overrideConfig?: Partial<WebhookConfig>,
+  attachment?: WebhookAttachment
+): Promise<WebhookSendResult> {
+  const configs = resolveWebhookConfigs(overrideConfig);
+
+  // Test runs must not page a human. An explicit overrideConfig means the test
+  // is driving its own mock server, which is allowed.
+  if (isTestEnvironment() && !overrideConfig?.webhookUrl) {
+    console.log(pc.dim(`[send_msg] Suppressed real Telegram message in test environment: ${message.slice(0, 80)}`));
+    return { ok: true, to: configs[0].notifyTo, raw: { suppressed: true } };
+  }
+
+  if (attachment && (!attachment.filePath || !attachment.filePath.trim())) {
+    throw new Error('[send_msg] attachment.filePath must be a non-empty string');
+  }
+
+  // `--notify main,inspilot` fans out: every target must accept the message,
+  // otherwise the run reports a real failure instead of a silent partial success.
+  const results: WebhookSendResult[] = [];
+  const failures: string[] = [];
+  for (const config of configs) {
+    try {
+      results.push(await postWebhook(config, message, attachment));
+    } catch (err: any) {
+      failures.push(`${config.bot}: ${err?.message || err}`);
+    }
+  }
+
+  if (failures.length > 0) {
+    const scope =
+      configs.length > 1
+        ? `${failures.length}/${configs.length} delivery target(s) failed`
+        : 'delivery failed';
+    throw new Error(`[send_msg] ${scope}: ${failures.join(' | ')}`);
+  }
+
+  if (results.length === 1) return results[0];
+
+  return {
+    ok: true,
+    to: configs.map((c) => c.notifyTo).join(','),
+    messageIds: results.flatMap((r) => r.messageIds ?? []),
+    raw: results.map((r) => r.raw),
+  };
+}
+
 export interface PiInboundConfig {
   inboundUrl: string;
   inboundToken: string;
@@ -264,25 +414,43 @@ export interface PiInboundConfig {
 }
 
 /**
- * Resolves configuration for forwarding messages to the running Pi instance.
- * Every field must be configured explicitly — there is no default host, port,
- * token or chat id, because a wrong guess silently routes alerts to the wrong
- * bot/session instead of failing.
+ * Caller-supplied Pi inbound overrides.
+ *
+ * `map` exists so a test (or a second deployment) can drive the bot→port
+ * mapping explicitly instead of relying on the project default.
  */
-export function getPiInboundConfig(override?: Partial<PiInboundConfig>): PiInboundConfig {
+export type PiInboundOverride = Partial<PiInboundConfig> & {
+  bot?: string;
+  map?: BotPortMap;
+};
+
+/**
+ * Resolves configuration for forwarding messages to the running Pi instance.
+ *
+ * The endpoint is project-level (`NOTIFY_PROJECT_DEFAULTS`), overridable by
+ * parameter. Only the token and chat id come from the environment: they are
+ * credentials, not routing decisions.
+ */
+export function getPiInboundConfig(override?: PiInboundOverride): PiInboundConfig {
   loadEnvFile();
 
-  const inboundUrl = override?.inboundUrl ?? process.env.PI_INBOUND_URL;
+  // A `--notify` target carries its own inbound endpoint, so the bot and the port
+  // can never drift apart. Without one, derive it from the project default bot.
+  const activeTarget = getNotifyTargets('result')[0];
+  const bot = (override?.bot ?? activeTarget?.bot ?? NOTIFY_PROJECT_DEFAULTS.bot).trim();
+  const map = override?.map ?? NOTIFY_PROJECT_DEFAULTS.botPorts;
+  const inboundUrl =
+    override?.inboundUrl ??
+    activeTarget?.inboundUrl ??
+    resolveNotifyTargets({ bots: [bot], map })[0]?.inboundUrl;
+
   if (!inboundUrl || !inboundUrl.trim()) {
-    throw new Error('Missing required environment variable: PI_INBOUND_URL must be defined');
+    throw new Error(`Cannot resolve the Pi inbound URL for bot "${bot}" (see src/utils/notify-defaults.ts)`);
   }
 
   // Bot and inbound port must agree, otherwise alerts land in the wrong Pi session.
-  const botPorts = parseBotPortMap(process.env.PI_TELEGRAM_BOT_PORTS);
-  const configuredBot = process.env.PI_TELEGRAM_BOT;
-  if (botPorts && configuredBot && configuredBot.trim()) {
-    assertBotPortConsistency(configuredBot, inboundUrl.trim(), botPorts);
-  }
+  // `override.bot` / `override.map` let a caller assert against its own mapping.
+  assertBotPortConsistency(bot, inboundUrl.trim(), map);
 
   const inboundToken = override?.inboundToken ?? process.env.PI_TELEGRAM_INBOUND_TOKEN;
   if (!inboundToken || !inboundToken.trim()) {
@@ -307,35 +475,82 @@ export function getPiInboundConfig(override?: Partial<PiInboundConfig>): PiInbou
   };
 }
 
+export interface ErrorChannelOverride {
+  webhookOverride?: Partial<WebhookConfig>;
+  /** `bot` is only used for the bot↔port consistency check of the error channel. */
+  piOverride?: PiInboundOverride;
+  /**
+   * Multiple error targets from `--notify` / `--notify-error`.
+   * Undefined means "single channel": errors follow the result channel.
+   */
+  targets?: NotifyTarget[];
+}
+
+/**
+ * Resolves the error/alert channel.
+ *
+ * Errors follow `--notify-error`, else the `--notify` targets, else the
+ * project default channel — the same place results go. There is no separate
+ * error bot in the environment anymore: one project-level decision, overridable
+ * by parameter.
+ */
+export function getErrorChannelOverride(): ErrorChannelOverride {
+  const targets = getNotifyTargets('error');
+  if (targets.length === 0) return {};
+
+  return {
+    webhookOverride: { bot: targets[0].bot },
+    piOverride: { inboundUrl: targets[0].inboundUrl, bot: targets[0].bot },
+    targets,
+  };
+}
+
 export interface NotificationConfigSummary {
   bot: string;
   notifyTo: string;
   webhookUrl: string;
   inboundUrl: string;
+  /** Bot that receives error/alert messages; equals `bot` when no error channel is configured. */
+  errorBot: string;
+  /** Pi inbound endpoint for error/alert messages. */
+  errorInboundUrl: string;
+  /** Resolved `--notify` targets (or `project-default (...)` when not overridden). */
+  resultTargets: string;
+  /** Resolved `--notify-error` targets (or `project-default (...)`). */
+  errorTargets: string;
 }
 
 /**
  * Startup self-check for the notification channels.
  *
- * Resolves both channels and (when `PI_TELEGRAM_BOT_PORTS` is configured)
- * verifies the bot name is known and that its Pi inbound port matches the
- * mapping. Throws with an actionable message instead of letting a pipeline run
- * for an hour and then lose every alert.
+ * Resolves both channels and verifies the bot name is part of the project map
+ * and that its Pi inbound port matches. Throws with an actionable message
+ * instead of letting a pipeline run for an hour and then lose every alert.
  */
 export function verifyNotificationConfig(options?: {
   webhookOverride?: Partial<WebhookConfig>;
-  piOverride?: Partial<PiInboundConfig>;
+  piOverride?: PiInboundOverride;
 }): NotificationConfigSummary {
   const webhook = getWebhookConfig(options?.webhookOverride);
   const inbound = getPiInboundConfig(options?.piOverride);
 
-  assertBotPortConsistency(webhook.bot, inbound.inboundUrl, getBotPortMap());
+  assertBotPortConsistency(webhook.bot, inbound.inboundUrl);
+
+  // The error channel is validated here too: a typo in `--notify-error` must
+  // fail at Stage 1, not silently drop the one alert that matters after an hour.
+  const errorChannel = getErrorChannelOverride();
+  const errorBot = errorChannel.webhookOverride?.bot ?? webhook.bot;
+  const errorInboundUrl = errorChannel.piOverride?.inboundUrl ?? inbound.inboundUrl;
 
   return {
     bot: webhook.bot,
     notifyTo: webhook.notifyTo,
     webhookUrl: webhook.webhookUrl,
     inboundUrl: inbound.inboundUrl,
+    errorBot,
+    errorInboundUrl,
+    resultTargets: describeNotifyTargets('result'),
+    errorTargets: describeNotifyTargets('error'),
   };
 }
 
@@ -345,7 +560,7 @@ export function verifyNotificationConfig(options?: {
  */
 export async function sendToPi(
   message: string,
-  overrideConfig?: Partial<PiInboundConfig>
+  overrideConfig?: PiInboundOverride
 ): Promise<boolean> {
   if (isTestEnvironment() && !overrideConfig?.inboundUrl) {
     console.log(pc.dim(`[sendToPi] Suppressed real Pi inbound message in test environment`));
@@ -382,32 +597,52 @@ export async function sendToPi(
 
 /**
  * Dispatches an error alert to both Telegram (via Webhook) and Pi (via Inbound listener).
+ *
+ * Delivery targets: `--notify-error` → `--notify` → project default.
+ * the standard channel. Multiple targets are fanned out; a caller-supplied
+ * override still wins over all of them.
  */
 export async function notifyError(
   message: string,
   options?: {
     webhookOverride?: Partial<WebhookConfig>;
-    piOverride?: Partial<PiInboundConfig>;
+    piOverride?: PiInboundOverride;
     attachment?: WebhookAttachment;
   }
 ): Promise<void> {
-  const tasks: Promise<any>[] = [];
+  const errorChannel = getErrorChannelOverride();
+  const targets = errorChannel.targets ?? [];
 
-  // 1. Telegram Webhook
-  tasks.push(
-    sendMsg(message, options?.webhookOverride, options?.attachment).catch((e) => {
-      console.error(pc.yellow(`[webhook] Warning: Failed to send Telegram notification: ${e.message}`));
-    })
-  );
+  const deliver = async (target?: NotifyTarget): Promise<void> => {
+    // A per-target bot also pins the matching Pi inbound endpoint, so the two
+    // legs of one alert can never disagree.
+    const webhookOverride = {
+      ...(target ? { bot: target.bot } : errorChannel.webhookOverride),
+      ...options?.webhookOverride,
+    };
+    const piOverride = {
+      ...(target ? { inboundUrl: target.inboundUrl, bot: target.bot } : errorChannel.piOverride),
+      ...options?.piOverride,
+    };
 
-  // 2. Pi Inbound Listener
-  tasks.push(
-    sendToPi(message, options?.piOverride).catch((e) => {
-      console.error(pc.dim(`[sendToPi] Warning: Failed to send to Pi: ${e.message}`));
-    })
-  );
+    await Promise.allSettled([
+      // 1. Telegram Webhook
+      sendMsg(message, webhookOverride, options?.attachment).catch((e) => {
+        console.error(pc.yellow(`[webhook] Warning: Failed to send Telegram notification: ${e.message}`));
+      }),
+      // 2. Pi Inbound Listener
+      sendToPi(message, piOverride).catch((e) => {
+        console.error(pc.dim(`[sendToPi] Warning: Failed to send to Pi: ${e.message}`));
+      }),
+    ]);
+  };
 
-  await Promise.allSettled(tasks);
+  if (targets.length <= 1) {
+    await deliver(targets[0]);
+    return;
+  }
+
+  await Promise.all(targets.map((target) => deliver(target)));
 }
 
 /**

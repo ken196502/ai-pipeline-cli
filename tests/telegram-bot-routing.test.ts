@@ -1,28 +1,33 @@
 /**
- * Regression tests for multi-bot Telegram gateway routing and strict
- * (fallback-free) notification configuration.
+ * Regression tests for multi-bot Telegram gateway routing.
  *
- * Rules pinned here:
- *  - The bot name comes from `PI_TELEGRAM_BOT` only. No alias, no default.
- *  - A missing/blank bot is a hard error, not a request that the gateway
- *    silently rejects.
- *  - Pi inbound needs `PI_INBOUND_URL` + `PI_TELEGRAM_INBOUND_TOKEN`; there is
- *    no hardcoded host/port/token fallback.
+ * Contract pinned here (project-level configuration, parameter-driven):
+ *  - The delivery bot is project-level (`NOTIFY_PROJECT_DEFAULTS.bot`), never env.
+ *  - A caller parameter wins over the project default.
+ *  - A bot outside the project map is a hard error before any request is sent.
+ *  - Pi inbound needs its token from env (a credential); the endpoint itself is
+ *    derived from the project defaults.
  *  - A gateway rejection surfaces as a real error (never a fake success).
  *
  * Everything runs against a local mock HTTP server: no real Telegram traffic.
  */
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import http from 'node:http';
+import path from 'node:path';
 import { after, before, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import {
   assertBotPortConsistency,
+  assertKnownBot,
   getPiInboundConfig,
   getWebhookConfig,
-  parseBotPortMap,
   sendMsg,
   verifyNotificationConfig,
 } from '../src/utils/send_msg.js';
+import { NOTIFY_PROJECT_DEFAULTS } from '../src/utils/notify-defaults.js';
+
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 interface CapturedRequest {
   authorization: string;
@@ -76,7 +81,6 @@ const baseOverride = () => ({
   webhookUrl,
   webhookToken: 'test-token',
   notifyTo: '5971350987',
-  bot: 'main',
 });
 
 /** Runs `fn` with the given env vars temporarily applied (undefined = unset). */
@@ -97,50 +101,58 @@ async function withEnv(vars: Record<string, string | undefined>, fn: () => Promi
   }
 }
 
-test('forwards PI_TELEGRAM_BOT from the environment as the bot field', async () => {
+/* ── bot selection ───────────────────────────────────────────────────────── */
+
+test('the default bot is the project-level default (no env involved)', async () => {
   captured.length = 0;
-  await withEnv({ PI_TELEGRAM_BOT: 'main' }, () => sendMsg('hello', { ...baseOverride(), bot: undefined }));
+  await withEnv({ PI_TELEGRAM_BOT: 'inspilot' }, () => sendMsg('hello', baseOverride()));
 
   assert.equal(captured.length, 1);
-  assert.equal(captured[0].body.bot, 'main');
+  assert.equal(captured[0].body.bot, NOTIFY_PROJECT_DEFAULTS.bot);
   assert.equal(captured[0].body.to, '5971350987');
   assert.equal(captured[0].authorization, 'Bearer test-token');
 });
 
-test('explicit override bot wins over the environment', async () => {
+test('PI_TELEGRAM_BOT is no longer consulted at all', async () => {
+  await withEnv({ PI_TELEGRAM_BOT: 'inspilot' }, () => {
+    assert.equal(getWebhookConfig(baseOverride()).bot, NOTIFY_PROJECT_DEFAULTS.bot);
+  });
+});
+
+test('an explicit caller bot wins over the project default', async () => {
   captured.length = 0;
-  await withEnv({ PI_TELEGRAM_BOT: 'main' }, () => sendMsg('hello', { ...baseOverride(), bot: 'inspilot' }));
+  await sendMsg('hello', { ...baseOverride(), bot: 'inspilot' });
 
   assert.equal(captured[0].body.bot, 'inspilot');
 });
 
-test('a blank bot is a hard error (no request is attempted)', async () => {
+test('a bot outside the project map is a hard error (no request attempted)', async () => {
   captured.length = 0;
   await assert.rejects(
-    () => sendMsg('hello', { ...baseOverride(), bot: '' }),
+    () => sendMsg('hello', { ...baseOverride(), bot: 'ghost' }),
     (err: Error) => {
-      assert.match(err.message, /PI_TELEGRAM_BOT/);
+      assert.match(err.message, /not part of the project bot map/);
+      assert.match(err.message, /main, inspilot/);
       return true;
     }
   );
   assert.equal(captured.length, 0, 'must fail before hitting the gateway');
 });
 
-test('TELEGRAM_BOT is not accepted as an alias for PI_TELEGRAM_BOT', async () => {
-  // `loadEnvFile()` refills PI_TELEGRAM_BOT from the repo .env, so a blank
-  // value must resolve to the .env bot — never to the TELEGRAM_BOT alias.
-  await withEnv({ PI_TELEGRAM_BOT: '', TELEGRAM_BOT: 'inspilot' }, () => {
-    const config = getWebhookConfig({ webhookUrl, webhookToken: 't', notifyTo: '1' });
-    assert.notEqual(config.bot, 'inspilot');
-    assert.equal(config.bot, 'main');
-  });
+test('a blank bot is a hard error (no silent fallback)', async () => {
+  captured.length = 0;
+  await assert.rejects(
+    () => sendMsg('hello', { ...baseOverride(), bot: '' }),
+    /bot is blank/i
+  );
+  assert.equal(captured.length, 0, 'must fail before hitting the gateway');
 });
 
 test('a multi-bot gateway rejection throws with the gateway message', async () => {
   rejectWithoutBot = true;
   try {
-    // Force a request without a bot by talking to the mock directly through a
-    // config that bypasses validation: the gateway 400 must not look like success.
+    // Force a request without a bot by talking to the mock directly: the
+    // gateway 400 must not look like success.
     await assert.rejects(
       async () => {
         const res = await fetch(webhookUrl, {
@@ -163,139 +175,142 @@ test('a multi-bot gateway rejection throws with the gateway message', async () =
   }
 });
 
-test('Pi inbound requires PI_INBOUND_URL (no hardcoded host/port)', () => {
-  assert.throws(
-    () => getPiInboundConfig({ inboundUrl: '', inboundToken: 't', senderId: '1' }),
-    /PI_INBOUND_URL/
-  );
-});
+/* ── Pi inbound ──────────────────────────────────────────────────────────── */
 
-test('Pi inbound requires PI_TELEGRAM_INBOUND_TOKEN (no hardcoded token)', async () => {
-  await withEnv({ PI_TELEGRAM_BOT: 'main' }, () => {
-    assert.throws(
-      () =>
-        getPiInboundConfig({
-          inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
-          inboundToken: '',
-          senderId: '1',
-        }),
-      /PI_TELEGRAM_INBOUND_TOKEN/
-    );
-  });
+test('Pi inbound token is a required credential (no hardcoded token)', () => {
+  assert.throws(
+    () => getPiInboundConfig({ inboundToken: '', senderId: '5971350987' }),
+    /PI_TELEGRAM_INBOUND_TOKEN must be defined/
+  );
 });
 
 test('Pi inbound ignores the INBOUND_WEBHOOK_TOKEN alias', async () => {
-  await withEnv({ PI_TELEGRAM_BOT: 'main', INBOUND_WEBHOOK_TOKEN: 'alias-token' }, () => {
-    assert.throws(
-      () =>
-        getPiInboundConfig({
-          inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
-          inboundToken: '',
-          senderId: '1',
-        }),
-      /PI_TELEGRAM_INBOUND_TOKEN/,
-      'a blank explicit token must not fall back to INBOUND_WEBHOOK_TOKEN'
-    );
-  });
-});
-
-test('Pi inbound resolves the configured endpoint and sender', async () => {
-  await withEnv({ PI_TELEGRAM_BOT: 'main' }, () => {
+  await withEnv({ INBOUND_WEBHOOK_TOKEN: 'alias-token' }, () => {
     const config = getPiInboundConfig({
       inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
-      inboundToken: 'Abcd#123456',
-      senderId: '5971350987',
+      inboundToken: 'real-token',
+      senderId: '1',
     });
-    assert.deepEqual(config, {
-      inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
-      inboundToken: 'Abcd#123456',
-      senderId: '5971350987',
-      chatId: '5971350987',
-    });
+    assert.equal(config.inboundToken, 'real-token');
   });
 });
 
-// ── PI_TELEGRAM_BOT_PORTS: explicit bot → inbound port self-check ──────────────
-
-test('parseBotPortMap: unset/blank disables the check', () => {
-  assert.equal(parseBotPortMap(undefined), undefined);
-  assert.equal(parseBotPortMap('   '), undefined);
+test('Pi inbound endpoint is derived from the project defaults', () => {
+  const config = getPiInboundConfig({
+    inboundToken: 't',
+    senderId: '5971350987',
+  });
+  assert.equal(config.inboundUrl, NOTIFY_PROJECT_DEFAULTS.inboundBaseUrl);
+  assert.equal(config.chatId, '5971350987');
 });
 
-test('parseBotPortMap: parses an explicit mapping, lowercasing bot names', () => {
-  assert.deepEqual(parseBotPortMap('main:3094, Inspilot:3095'), { main: 3094, inspilot: 3095 });
+test('Pi inbound follows the caller bot to its mapped port', () => {
+  const config = getPiInboundConfig({
+    bot: 'inspilot',
+    inboundToken: 't',
+    senderId: '1',
+  });
+  assert.equal(
+    config.inboundUrl,
+    `http://127.0.0.1:${NOTIFY_PROJECT_DEFAULTS.botPorts.inspilot}/telegram/inbound`
+  );
 });
 
-test('parseBotPortMap: rejects malformed mappings', () => {
-  assert.throws(() => parseBotPortMap('main'), /expected <bot>:<port>/);
-  assert.throws(() => parseBotPortMap('main:'), /expected <bot>:<port>/);
-  assert.throws(() => parseBotPortMap(':3094'), /expected <bot>:<port>/);
-  assert.throws(() => parseBotPortMap('main:abc'), /port must be an integer/);
-  assert.throws(() => parseBotPortMap('main:70000'), /out of range/);
-  assert.throws(() => parseBotPortMap('main:3094,,inspilot:3095'), /empty entry/);
-  assert.throws(() => parseBotPortMap('main:3094,main:3095'), /duplicate bot/);
-});
-
-test('assertBotPortConsistency: skips everything when no map is configured', () => {
-  assert.doesNotThrow(() => assertBotPortConsistency('anything', 'http://127.0.0.1:9999/telegram/inbound', undefined));
-});
-
-test('assertBotPortConsistency: unknown bot is an error', () => {
+test('Pi inbound rejects a bot/port mismatch instead of delivering to the wrong session', () => {
   assert.throws(
-    () => assertBotPortConsistency('inspilot', 'http://127.0.0.1:3095/telegram/inbound', { main: 3094 }),
-    /is not listed in PI_TELEGRAM_BOT_PORTS \(known bots: main\)/
-  );
-});
-
-test('assertBotPortConsistency: bot/port mismatch is an error', () => {
-  assert.throws(
-    () => assertBotPortConsistency('inspilot', 'http://127.0.0.1:3094/telegram/inbound', { main: 3094, inspilot: 3095 }),
-    /Bot\/port mismatch: PI_TELEGRAM_BOT="inspilot" must post to port 3095/
-  );
-  assert.doesNotThrow(() =>
-    assertBotPortConsistency('inspilot', 'http://127.0.0.1:3095/telegram/inbound', { main: 3094, inspilot: 3095 })
-  );
-});
-
-test('assertBotPortConsistency: missing port in URL falls back to the scheme default', () => {
-  assert.throws(
-    () => assertBotPortConsistency('main', 'http://127.0.0.1/telegram/inbound', { main: 3094 }),
-    /points at port 80/
-  );
-});
-
-test('verifyNotificationConfig: passes for a consistent configuration', async () => {
-  await withEnv({ PI_TELEGRAM_BOT: 'main' }, () => {
-    const summary = verifyNotificationConfig({
-      webhookOverride: { webhookUrl, webhookToken: 't', notifyTo: '5971350987', bot: 'main' },
-      piOverride: {
+    () =>
+      getPiInboundConfig({
+        bot: 'inspilot',
         inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
+        inboundToken: 't',
+        senderId: '1',
+      }),
+    /Bot\/port mismatch/
+  );
+});
+
+/* ── project bot map ─────────────────────────────────────────────────────── */
+
+test('assertKnownBot: unknown bot lists the project map', () => {
+  assert.throws(() => assertKnownBot('ghost'), /known bots: main, inspilot/);
+  assert.doesNotThrow(() => assertKnownBot('inspilot'));
+});
+
+test('assertBotPortConsistency: every mapped bot derives its own port', () => {
+  for (const [bot, port] of Object.entries(NOTIFY_PROJECT_DEFAULTS.botPorts)) {
+    assert.doesNotThrow(() =>
+      assertBotPortConsistency(bot, `http://127.0.0.1:${port}/telegram/inbound`)
+    );
+    assert.throws(
+      () => assertBotPortConsistency(bot, 'http://127.0.0.1:1/telegram/inbound'),
+      /Bot\/port mismatch/
+    );
+  }
+});
+
+test('assertBotPortConsistency: an invalid URL is a hard error', () => {
+  assert.throws(() => assertBotPortConsistency('main', 'not a url'), /not a valid URL/);
+});
+
+/* ── startup self-check ──────────────────────────────────────────────────── */
+
+test('verifyNotificationConfig: reports the project defaults', async () => {
+  await withEnv({ PI_TELEGRAM_BOT: 'inspilot' }, () => {
+    const summary = verifyNotificationConfig({
+      webhookOverride: { webhookUrl, webhookToken: 't', notifyTo: '5971350987' },
+      piOverride: {
+        inboundUrl: NOTIFY_PROJECT_DEFAULTS.inboundBaseUrl,
         inboundToken: 'Abcd#123456',
         senderId: '5971350987',
       },
     });
-    assert.deepEqual(summary, {
-      bot: 'main',
-      notifyTo: '5971350987',
-      webhookUrl,
-      inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
-    });
+
+    assert.equal(summary.bot, NOTIFY_PROJECT_DEFAULTS.bot);
+    assert.equal(summary.errorBot, NOTIFY_PROJECT_DEFAULTS.bot);
+    assert.equal(summary.inboundUrl, NOTIFY_PROJECT_DEFAULTS.inboundBaseUrl);
+    assert.match(summary.resultTargets, /project-default/);
+    assert.match(summary.errorTargets, /project-default/);
   });
 });
 
-test('verifyNotificationConfig: fails when bot and inbound port disagree', async () => {
-  await withEnv({ PI_TELEGRAM_BOT: 'inspilot' }, () => {
-    assert.throws(
-      () =>
-        verifyNotificationConfig({
-          webhookOverride: { webhookUrl, webhookToken: 't', notifyTo: '5971350987', bot: 'inspilot' },
-          piOverride: {
-            inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
-            inboundToken: 'Abcd#123456',
-            senderId: '5971350987',
-          },
-        }),
-      /Bot\/port mismatch/
-    );
-  });
+test('verifyNotificationConfig: fails when bot and inbound port disagree', () => {
+  assert.throws(
+    () =>
+      verifyNotificationConfig({
+        webhookOverride: { webhookUrl, webhookToken: 't', notifyTo: '5971350987', bot: 'inspilot' },
+        piOverride: {
+          inboundUrl: 'http://127.0.0.1:3094/telegram/inbound',
+          inboundToken: 'Abcd#123456',
+          senderId: '5971350987',
+        },
+      }),
+    /Bot\/port mismatch/
+  );
+});
+
+/* ── no bot config left in env ───────────────────────────────────────────── */
+
+test('no bot-related env keys are read by the notification layer', async () => {
+  const source = await fs.readFile(path.join(PROJECT_ROOT, 'src/utils/send_msg.ts'), 'utf8');
+  for (const key of [
+    'PI_TELEGRAM_BOT_PORTS',
+    'PI_TELEGRAM_ERROR_BOT',
+    'PI_TELEGRAM_ERROR_INBOUND_URL',
+    'NOTIFY_ERROR_TARGET',
+  ]) {
+    assert.equal(source.includes(key), false, `${key} must not be read anymore`);
+  }
+  // `PI_TELEGRAM_BOT` may only appear in an explanatory comment.
+  const codeLines = source
+    .split('\n')
+    .filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
+    .filter((line) => line.includes('PI_TELEGRAM_BOT'));
+  assert.deepEqual(codeLines, [], 'PI_TELEGRAM_BOT must not appear in executable code');
+});
+
+test('the supervisor default bot matches the project default', async () => {
+  const source = await fs.readFile(path.join(PROJECT_ROOT, 'tools/xdev-supervisor.mjs'), 'utf8');
+  const match = /const PROJECT_DEFAULT_BOT = '([^']+)'/.exec(source);
+  assert.ok(match, 'supervisor must declare PROJECT_DEFAULT_BOT');
+  assert.equal(match[1], NOTIFY_PROJECT_DEFAULTS.bot);
 });

@@ -10,20 +10,11 @@ import { notifyError } from '../src/utils/send_msg.js';
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /**
- * The bot→port map and bot name come from the ambient environment / .env (and the
- * loader never overwrites an already-set variable, but treats an empty string as
- * unset). Pin them explicitly to the mock inbound port so the bot→port consistency
- * check runs against this test instead of the box's real 3094/3095 mapping.
+ * The bot→port mapping is project-level configuration now. A test that mocks the
+ * Pi inbound on an ephemeral port passes its own `map` to `notifyError()`; no
+ * environment variable is involved.
  */
-function pinBotPortMap(inboundPort: number): void {
-  process.env.PI_TELEGRAM_BOT = 'main';
-  process.env.PI_TELEGRAM_BOT_PORTS = `main:${inboundPort}`;
-  delete process.env.WEBHOOK_URL;
-  delete process.env.WEBHOOK_TOKEN;
-  delete process.env.NOTIFY_TO;
-  delete process.env.PI_INBOUND_URL;
-  delete process.env.PI_TELEGRAM_INBOUND_TOKEN;
-}
+const MOCK_PI_BOT = 'main';
 
 interface CapturedRequest {
   url: string;
@@ -68,7 +59,6 @@ async function startMockServer(name: string): Promise<{
 test('notifyError delivers the same failure to Telegram and Pi inbound', async () => {
   const telegram = await startMockServer('webhook');
   const pi = await startMockServer('telegram/inbound');
-  pinBotPortMap(pi.port);
 
   try {
     await notifyError('❌ Viral pipeline failed: no prompts extracted', {
@@ -76,13 +66,15 @@ test('notifyError delivers the same failure to Telegram and Pi inbound', async (
         webhookUrl: telegram.url,
         webhookToken: 'tg-token',
         notifyTo: '5971350987',
-        bot: 'main',
+        bot: MOCK_PI_BOT,
       },
       piOverride: {
         inboundUrl: pi.url,
         inboundToken: 'pi-token',
         senderId: '5971350987',
         chatId: '5971350987',
+        bot: MOCK_PI_BOT,
+        map: { [MOCK_PI_BOT]: pi.port },
       },
     });
 
@@ -90,7 +82,7 @@ test('notifyError delivers the same failure to Telegram and Pi inbound', async (
     assert.equal(telegram.requests.length, 1);
     assert.equal(telegram.requests[0].authorization, 'Bearer tg-token');
     assert.equal(telegram.requests[0].body.to, '5971350987');
-    assert.equal(telegram.requests[0].body.bot, 'main');
+    assert.equal(telegram.requests[0].body.bot, MOCK_PI_BOT);
     assert.match(telegram.requests[0].body.message, /Viral pipeline failed/);
 
     // Pi channel: inbound contract (body/senderId/chatId + bearer token).
@@ -109,21 +101,22 @@ test('notifyError delivers the same failure to Telegram and Pi inbound', async (
 test('notifyError still delivers to Telegram when the Pi inbound is unreachable', async () => {
   const telegram = await startMockServer('webhook');
 
-  // Port 1 is never a Pi inbound listener.
-  pinBotPortMap(1);
   try {
+    // Port 1 is never a Pi inbound listener.
     await notifyError('❌ partial failure: 1 clip failed', {
       webhookOverride: {
         webhookUrl: telegram.url,
         webhookToken: 'tg-token',
         notifyTo: '5971350987',
-        bot: 'main',
+        bot: MOCK_PI_BOT,
       },
       piOverride: {
         inboundUrl: 'http://127.0.0.1:1/telegram/inbound',
         inboundToken: 'pi-token',
         senderId: '5971350987',
         chatId: '5971350987',
+        bot: MOCK_PI_BOT,
+        map: { [MOCK_PI_BOT]: 1 },
       },
     });
 

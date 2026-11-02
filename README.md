@@ -107,8 +107,11 @@ PI_TELEGRAM_BOT=main
 PI_INBOUND_URL=http://127.0.0.1:3094/telegram/inbound
 PI_TELEGRAM_INBOUND_TOKEN=...
 # bot → Pi inbound 端口显式映射：启动期自检用，bot 不在表里或端口对不上直接报错；
-# 不写则跳过检查（不会猜端口）
+# 不写则跳过检查（不会猜端口）。`--notify` 也靠这张表推导目标端口
 PI_TELEGRAM_BOT_PORTS=main:3094,inspilot:3095
+# 错误/告警专用 bot（可选）。命令行 --notify / --notify-error 优先级更高
+PI_TELEGRAM_ERROR_BOT=main
+PI_TELEGRAM_ERROR_INBOUND_URL=http://127.0.0.1:3094/telegram/inbound
 ```
 
 ---
@@ -163,6 +166,7 @@ npm run module:explainer-video -- path/to/eval-result.json path/to/harvest-resul
 
 > ⚠️ **Topic 配置说明**：Xhot 流水线不使用任何硬编码默认 topic。每次执行必须通过 CLI 指定 topic，或者在环境变量/`.env` 中配置 `XHOT_TOPICS` / `XHOT_TOPIC`。若未配置任何 topic，流水线将直接报错退出。
 
+
 ```bash
 # 通过 CLI 传参指定 topic
 npm run aigc -- xhot "AI agents"
@@ -191,6 +195,28 @@ npm run aigc -- xhot "claude 3.7" --candidate-count 12 --max-age-hours 48 --head
 
 # 跳过视频渲染
 npm run aigc -- xhot "sora video" --skip-video
+```
+
+### 3.5 Profile 体积维护
+
+持久化 profile 是系统 Chromium 的克隆，缓存曾占到 1.34 GB（`Default/Cache` 929 MB、
+`Service Worker` 237 MB、`Code Cache` 102 MB）。现在：
+
+- 克隆时**不拷**缓存/遥测目录，只保留 `Cookies` / `Local Storage` / `IndexedDB` / `Preferences`；
+- 冷启动 spawn 前自动清理一次（浏览器运行中会自动跳过）；
+- 浏览器带 `--disk-cache-size=64MB`，不会重新长回 GB 级。
+
+```bash
+# 看体积与大目录
+node dist/cli.js profile size            # 或 pnpm aigc profile size
+
+# 清缓存（保留登录）；浏览器还开着会拒绝执行并给出 pid
+node dist/cli.js profile clean
+node dist/cli.js profile clean --dry-run   # 只报告
+node dist/cli.js profile clean --force     # 浏览器运行时强制清理
+
+# 指定 profile 目录
+node dist/cli.js profile clean -p /path/to/.chromium-profile
 ```
 
 ### 4. 查看帮助
@@ -222,6 +248,38 @@ npx tsx src/cli.ts flowTutor "AI make Niche Viral Video" --skip-flow-gen
 ```bash
 npm run build
 ```
+
+### 7. 指定通知目标（`--notify` / `--notify-error`）
+
+默认所有 pipeline 的**结果**和**错误**都发给 `PI_TELEGRAM_BOT`（错误通道是 `PI_TELEGRAM_ERROR_BOT`）。
+想临时改投递目标，用 CLI 参数，不必改 `.env`：
+
+```bash
+# 结果 + 错误都发给 inspilot（本次运行生效）
+npx tsx src/cli.ts xdev --notify inspilot
+
+# 结果发 main，错误单独发 inspilot
+npx tsx src/cli.ts xdev --notify main --notify-error inspilot
+
+# 同时发两个 bot
+npx tsx src/cli.ts xdev --notify main,inspilot
+
+# 不解析 CLI 参数的入口（独立 module CLI / runner）用环境变量
+NOTIFY_TARGET=inspilot npx tsx src/modules/auth/cli.ts
+NOTIFY_TARGET=main NOTIFY_ERROR_TARGET=inspilot npm run pipeline:flowTutor
+
+# xhot / flowTutor 同样支持
+npx tsx src/cli.ts flowTutor --notify inspilot
+
+# supervisor 也支持，并会透传给子进程 pipeline
+node tools/xdev-supervisor.mjs --notify inspilot
+```
+
+规则：
+
+- **优先级**：调用方显式 `bot`（测试/专用通道） > `--notify` / `--notify-error` > `NOTIFY_TARGET` / `NOTIFY_ERROR_TARGET` > `PI_TELEGRAM_ERROR_BOT` > `PI_TELEGRAM_BOT`。
+- **不猜端口**：bot 必须在 `PI_TELEGRAM_BOT_PORTS` 里，Pi inbound 端口由该映射推导（scheme/host/path 沿用 `PI_INBOUND_URL`）。未知 bot、空项、缺少映射都会在**启动前**直接失败并退出码 78，不会跑到一半才发现告警发错地方。
+- **多目标必须全部成功**：`--notify main,inspilot` 中任一目标投递失败即视为失败并报错（不做静默的部分成功）。
 
 ---
 

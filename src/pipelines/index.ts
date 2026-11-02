@@ -9,10 +9,12 @@
 import { pipelineRegistry } from './core/registry.js';
 import { xhotPipeline } from './xhot/execute.js';
 import { flowTutorPipeline } from './flowtutor/execute.js';
+import { xdevPipeline } from './xdev/execute.js';
 
 // ── Auto-register available pipelines ───────────────────────────
 pipelineRegistry.register(xhotPipeline);
 pipelineRegistry.register(flowTutorPipeline);
+pipelineRegistry.register(xdevPipeline);
 
 // ── Exports ─────────────────────────────────────────────────────
 export * from './core/index.js';
@@ -46,4 +48,14 @@ export {
   attachFlowTutorOptions,
   handleFlowTutorCommand,
 } from './flowtutor/index.js';
+export {
+  xdevPipeline,
+  executeXDevPipeline,
+  type XDevPipelineOptions,
+  type XDevPipelineResult,
+  XDEV_STAGES,
+  XDevPipelineOptionsSchema,
+  attachXDevOptions,
+  handleXDevCommand,
+} from './xdev/index.js';
 export { pipelineRegistry };

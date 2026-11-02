@@ -41,6 +41,7 @@ tutorial-preview/
 runner-24h-state.json
 x_cookies.json
 x_cookies.json.broken-*
+x_cookies.json.bak*
 
 # Puter ASR credentials and temp files
 puter_token.json
