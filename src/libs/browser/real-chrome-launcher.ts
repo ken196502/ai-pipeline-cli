@@ -15,6 +15,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import pc from 'picocolors';
 import { NativeBridge } from './native-bridge.js';
+import { pruneProfile, formatBytes } from './profile-cache.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -198,6 +199,17 @@ export async function launchRealChrome(
   }
 
   if (!pid) {
+    // Cold start: no Chrome owns the profile yet, so the caches previous runs
+    // left behind can be dropped before this process opens its files.
+    const pruned = await pruneProfile(profileDir);
+    if (!pruned.skipped && pruned.freedBytes > 0) {
+      console.log(
+        pc.gray(
+          `[real-chrome] Pruned ${pruned.removedDirs.length} cache dir(s), freed ${formatBytes(pruned.freedBytes)}`
+        )
+      );
+    }
+
     // Launch new Chrome process
     const executablePath = await findChromeBinary(options.executablePath);
     console.log(pc.cyan(`[real-chrome] Launching: ${executablePath}`));
@@ -218,6 +230,7 @@ export async function launchRealChrome(
       '--ignore-gpu-blocklist',
       '--enable-gpu-rasterization',
       '--enable-zero-copy',
+      '--disk-cache-size=67108864',
       // DO NOT add: --remote-debugging-port, --enable-automation
     ];
 

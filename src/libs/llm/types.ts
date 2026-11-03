@@ -51,6 +51,17 @@ export interface ChatRequest {
   context: { stage: string; task: string };
   /** Partial retry overrides merged over the default retry policy. */
   retryPolicy?: Partial<RetryPolicy>;
+  /**
+   * Set to false to disable the model's thinking stream for this request.
+   *
+   * Only honored on the chat-completions path, where it is sent as
+   * `chat_template_kwargs.enable_thinking`. `reasoning_effort` is NOT a working
+   * knob for Qwen deployments on this gateway: "low"/"minimal"/"none" are all
+   * silently ignored (measured: 197-249 reasoning chars, identical to no
+   * parameter), while `enable_thinking:false` yields 0. Use this for mechanical
+   * tasks (selection/ranking); leave it unset for writing tasks.
+   */
+  thinking?: boolean;
 }
 
 export interface ChatResult {

@@ -94,3 +94,17 @@ export {
   parseNetscapeCookies,
   saveCookiesToFile,
 } from '../../utils/cookies.js';
+
+// Profile Cache Management
+// The persistent profile is a clone of the system Chromium; its caches used to
+// be copied too (1.34 GB of a 1.4 GB profile). These helpers skip and prune them.
+export {
+  PROFILE_SKIP_DIRS,
+  PROFILE_IGNORE_FILES,
+  pruneProfile,
+  profileInUse,
+  dirSizeBytes,
+  formatBytes,
+  type PruneResult,
+  type PruneOptions,
+} from './profile-cache.js';

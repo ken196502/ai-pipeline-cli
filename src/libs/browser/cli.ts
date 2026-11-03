@@ -21,6 +21,7 @@ import { takeScreenshot } from './screenshots.js';
 import { exportCookies } from './actions.js';
 import { createRunLogger } from '../../utils/logger.js';
 import { generateRunId, ensureOutputDir } from '../../utils/run.js';
+import { pruneProfile, dirSizeBytes, formatBytes } from './profile-cache.js';
 
 const program = new Command();
 
@@ -38,7 +39,7 @@ program
   .option('-o, --out-dir <path>', 'Output directory for run artifacts')
   .action(async (opts) => {
     const runId = generateRunId('browser-check');
-    const outDir = await ensureOutputDir(opts.outDir, runId);
+    const outDir = await ensureOutputDir(opts.outDir, runId, 'browser');
 
     const logger = createRunLogger({
       runId,
@@ -86,7 +87,7 @@ program
   .option('-o, --out-dir <path>', 'Output directory for run artifacts')
   .action(async (opts) => {
     const runId = generateRunId('browser-install');
-    const outDir = await ensureOutputDir(opts.outDir, runId);
+    const outDir = await ensureOutputDir(opts.outDir, runId, 'browser');
 
     const logger = createRunLogger({
       runId,
@@ -127,7 +128,7 @@ program
   .option('-o, --out-dir <path>', 'Output directory for run artifacts')
   .action(async (opts) => {
     const runId = generateRunId('browser-launch');
-    const outDir = await ensureOutputDir(opts.outDir, runId);
+    const outDir = await ensureOutputDir(opts.outDir, runId, 'browser');
 
     const logger = createRunLogger({
       runId,
@@ -199,10 +200,10 @@ program
   .option('-p, --profile-dir <path>', 'Persistent profile directory', './.chromium-profile')
   .option('-b, --browser-path <path>', 'Path to Chromium executable')
   .option('--no-headless', 'Show browser window during capture')
-  .option('--artifacts-dir <path>', 'Output directory for run artifacts (default: artifacts/screenshot-<runId>/)')
+  .option('--artifacts-dir <path>', 'Output directory for run artifacts (default: artifacts/browser/<runId>/)')
   .action(async (opts) => {
     const runId = generateRunId('screenshot');
-    const outDir = await ensureOutputDir(opts.artifactsDir, runId);
+    const outDir = await ensureOutputDir(opts.artifactsDir, runId, 'browser');
 
     const logger = createRunLogger({
       runId,
@@ -291,10 +292,10 @@ program
   .option('-p, --profile-dir <path>', 'Persistent profile directory', './.chromium-profile')
   .option('-b, --browser-path <path>', 'Path to Chromium executable')
   .option('--headless', 'Run headless without UI', false)
-  .option('--artifacts-dir <path>', 'Output directory for run artifacts (default: artifacts/browser-cookies-<runId>/)')
+  .option('--artifacts-dir <path>', 'Output directory for run artifacts (default: artifacts/browser/<runId>/)')
   .action(async (opts) => {
     const runId = generateRunId('browser-cookies');
-    const outDir = await ensureOutputDir(opts.artifactsDir, runId);
+    const outDir = await ensureOutputDir(opts.artifactsDir, runId, 'browser');
 
     const logger = createRunLogger({
       runId,
@@ -364,6 +365,57 @@ program
     } finally {
       await logger.close();
     }
+  });
+
+/**
+ * Command: clean-profile
+ * Deletes Chromium's cache/telemetry directories from the persistent profile.
+ * Cookies, Local Storage and IndexedDB are kept, so existing logins survive.
+ */
+program
+  .command('clean-profile')
+  .description('Delete cache/telemetry dirs from the persistent profile (login is kept)')
+  .option('-p, --profile-dir <path>', 'Persistent profile directory', './.chromium-profile')
+  .option('--force', 'Clean even when a Chromium is running on the profile', false)
+  .option('--dry-run', 'Only report what would be removed', false)
+  .action(async (opts) => {
+    const profileDir = path.resolve(opts.profileDir);
+    console.log(pc.bold(pc.cyan('\n=== Chromium Profile Cache Cleanup ===\n')));
+    console.log(`${pc.bold('Profile Dir:')} ${profileDir}`);
+
+    const stat = await fs.stat(profileDir).catch(() => null);
+    if (!stat?.isDirectory()) {
+      console.error(pc.red(`\nProfile not found: ${profileDir}\n`));
+      process.exit(1);
+    }
+
+    const result = await pruneProfile(profileDir, { force: opts.force, dryRun: opts.dryRun });
+
+    if (result.skipped) {
+      console.log(
+        pc.yellow(`\nSkipped: a Chromium is still running on this profile (pid ${result.pid}).`)
+      );
+      console.log(pc.dim(`Profile is ${formatBytes(result.remainingBytes)}. Close the browser, or re-run with --force.\n`));
+      process.exitCode = 2;
+      return;
+    }
+
+    if (result.removedDirs.length === 0 && result.removedFiles === 0) {
+      console.log(pc.green(`\nNothing to clean (${formatBytes(result.remainingBytes)}).\n`));
+      return;
+    }
+
+    for (const dir of result.removedDirs) console.log(pc.dim(`  ${opts.dryRun ? 'would remove' : '-'} ${dir}`));
+    if (result.removedFiles > 0) {
+      console.log(pc.dim(`  ${opts.dryRun ? 'would remove' : '-'} ${result.removedFiles} junk file(s)`));
+    }
+    console.log('');
+    console.log(
+      (opts.dryRun ? pc.yellow('Would free ') : pc.green('Freed ')) +
+        pc.bold(formatBytes(result.freedBytes)) +
+        pc.dim(`  (remains ${formatBytes(result.remainingBytes)})`)
+    );
+    console.log(pc.dim('Cookies / Local Storage / IndexedDB kept — the login survives.\n'));
   });
 
 program.parse(process.argv);

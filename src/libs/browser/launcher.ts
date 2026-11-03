@@ -12,8 +12,10 @@ import { promisify } from 'node:util';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
 import pc from 'picocolors';
 import { resolveChromiumPath } from './installer.js';
+import { pruneProfile, formatBytes } from './profile-cache.js';
 import { ensureLoopbackNoProxy, listBrowserPages } from './cdp.js';
 import {
+  adoptOrphanBrowser,
   clearSessionInfo,
   findAvailablePort,
   isPidAlive,
@@ -726,7 +728,10 @@ export async function launchBrowser(
 
   // 1. Check if an existing browser session is active for this profile
   if (reuseSession) {
-    let sessionCheck = await isSessionAlive(profileDir);
+    const adoptedSession = await adoptOrphanBrowser(profileDir);
+    let sessionCheck = adoptedSession
+      ? { alive: true, session: adoptedSession }
+      : await isSessionAlive(profileDir);
     // An explicitly headful request (interactive login flows) must never be
     // silently attached to a headless keep-alive instance — the user would
     // see no window at all. Restart the headless session in that case.
@@ -855,12 +860,27 @@ export async function launchBrowser(
   // 2. Launch new browser (detached if keepAlive)
   const port = options.remoteDebuggingPort || (await findAvailablePort(9222, profileDir));
 
+  // A cold start is the only moment the profile can be pruned safely: no
+  // Chromium owns it, and the caches the previous runs accumulated can be
+  // dropped before the new process opens its files.
+  const pruned = await pruneProfile(profileDir);
+  if (!pruned.skipped && pruned.freedBytes > 0) {
+    console.log(
+      pc.gray(
+        `[browser] Pruned ${pruned.removedDirs.length} cache dir(s), freed ${formatBytes(pruned.freedBytes)} (now ${formatBytes(pruned.remainingBytes)})`
+      )
+    );
+  }
+
   const defaultArgs = [
     '--no-first-run',
     '--no-default-browser-check',
     '--ignore-gpu-blocklist',
     '--enable-gpu-rasterization',
     '--enable-zero-copy',
+    // Cap the on-disk HTTP cache. Without this the persistent profile grows back
+    // into the hundreds of megabytes during long harvest runs.
+    '--disk-cache-size=67108864',
   ];
 
   // Window size matches real screen dimensions or custom viewport.

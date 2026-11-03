@@ -6,6 +6,7 @@
  * CDP reconnection without re-launching Chromium.
  */
 import { spawn, execSync } from 'node:child_process';
+import { once } from 'node:events';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
@@ -64,6 +65,7 @@ export async function saveSessionInfo(
     await fs.writeFile(filePath, JSON.stringify(data, null, 2) + '\n', 'utf8');
   } catch (err: any) {
     console.warn(pc.yellow(`[browser-session] Failed to write session file: ${err.message}`));
+    throw err;
   }
 }
 
@@ -113,6 +115,47 @@ export function isPidAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Adopts a live Linux Chromium process that owns this profile's singleton lock.
+ */
+export async function adoptOrphanBrowser(profileDir: string): Promise<BrowserSessionInfo | null> {
+  if (process.platform !== 'linux') return null;
+  const resolvedProfileDir = path.resolve(profileDir);
+  let pid: number;
+  let port: number;
+  try {
+    const lock = await fs.readlink(path.join(resolvedProfileDir, 'SingletonLock'));
+    const pidText = lock.slice(lock.lastIndexOf('-') + 1);
+    if (!/^\d+$/.test(pidText)) return null;
+    pid = Number(pidText);
+    if (!Number.isSafeInteger(pid) || pid <= 1 || !isPidAlive(pid)) return null;
+
+    const cmdline = (await fs.readFile(`/proc/${pid}/cmdline`, 'utf8')).split('\0');
+    if (!cmdline.includes(`--user-data-dir=${resolvedProfileDir}`)) return null;
+    const portArg = cmdline.find((arg) => /^--remote-debugging-port=\d+$/.test(arg));
+    if (!portArg) return null;
+    port = Number(portArg.slice('--remote-debugging-port='.length));
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  } catch {
+    // Missing lock or inaccessible /proc means ownership cannot be verified.
+    return null;
+  }
+
+  const cdpCheck = await isCDPEndpointAlive(port);
+  if (!cdpCheck.alive) return null;
+  const session: BrowserSessionInfo = {
+    port,
+    profileDir: resolvedProfileDir,
+    pid,
+    wsEndpoint: cdpCheck.wsEndpoint,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  await saveSessionInfo(profileDir, session);
+  console.log(`[browser] Adopted orphan browser pid ${pid} on port ${port}`);
+  return session;
 }
 
 /**
@@ -279,49 +322,66 @@ export async function spawnDetachedChromium(options: {
   port: number;
   timeoutMs?: number;
 }): Promise<number> {
-  const { executablePath, args, profileDir, port, timeoutMs = 20_000 } = options;
+  const { executablePath, args, profileDir, port } = options;
+  const configuredTimeoutMs = Number(process.env.CDP_START_TIMEOUT_MS);
+  const timeoutMs = options.timeoutMs ?? (
+    Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs >= 5000
+      ? configuredTimeoutMs
+      : 90_000
+  );
 
-  const child = spawn(executablePath, args, {
-    detached: true,
-    stdio: 'ignore',
-  });
-  // Ensure the browser becomes a process group leader so killProcessTree
-  // can kill it and all its children via process.kill(-pid).
-  child.unref();
+  let pid: number | undefined;
+  try {
+    const child = spawn(executablePath, args, {
+      detached: true,
+      stdio: 'ignore',
+    });
+    // Ensure the browser becomes a process group leader so killProcessTree
+    // can kill it and all its children via process.kill(-pid).
+    child.unref();
 
-  const pid = child.pid;
-  if (!pid) {
-    throw new Error(`Failed to spawn Chromium process at ${executablePath}`);
-  }
-
-  // Poll until CDP endpoint responds
-  const start = Date.now();
-  let wsEndpoint: string | undefined;
-
-  while (Date.now() - start < timeoutMs) {
-    const check = await isCDPEndpointAlive(port, 300);
-    if (check.alive) {
-      wsEndpoint = check.wsEndpoint;
-      break;
+    await once(child, 'spawn');
+    pid = child.pid;
+    if (!pid) {
+      throw new Error(`Failed to spawn Chromium process at ${executablePath}`);
     }
-    await new Promise((r) => setTimeout(r, 200));
+
+    // Poll until CDP endpoint responds
+    const start = Date.now();
+    let wsEndpoint: string | undefined;
+
+    while (Date.now() - start < timeoutMs) {
+      if (!isPidAlive(pid) || child.exitCode !== null || child.signalCode !== null) {
+        throw new Error(`Chromium exited before CDP was ready (PID ${pid})`);
+      }
+      const check = await isCDPEndpointAlive(port, 300);
+      if (check.alive) {
+        wsEndpoint = check.wsEndpoint;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    if (!wsEndpoint) {
+      throw new Error(
+        `Chromium launched (PID ${pid}) but CDP endpoint on port ${port} did not respond within ${timeoutMs}ms.`
+      );
+    }
+
+    await saveSessionInfo(profileDir, {
+      port,
+      profileDir: path.resolve(profileDir),
+      pid,
+      wsEndpoint,
+      createdAt: new Date().toISOString(),
+    });
+
+    return pid;
+  } catch (err) {
+    if (pid) await killProcessTree(pid, 'SIGKILL');
+    await clearSessionInfo(profileDir);
+    throw err;
   }
-
-  if (!wsEndpoint) {
-    throw new Error(
-      `Chromium launched (PID ${pid}) but CDP endpoint on port ${port} did not respond within ${timeoutMs}ms.`
-    );
-  }
-
-  await saveSessionInfo(profileDir, {
-    port,
-    profileDir: path.resolve(profileDir),
-    pid,
-    wsEndpoint,
-    createdAt: new Date().toISOString(),
-  });
-
-  return pid;
 }
 
 /**

@@ -379,7 +379,7 @@ async function invokeWithRetry(
 
       const contentType = response.headers.get('content-type') || '';
       if (contentType.includes('text/event-stream')) {
-        return await parseSseChatResponse(response, args.model);
+        return await parseSseChatResponse(response, args.model, args.context);
       }
 
       const payload = (await response.json()) as Record<string, unknown>;
@@ -456,6 +456,13 @@ async function rawFetchRequest(
     body.response_format = { type: 'json_object' };
   }
 
+  // Qwen deployments on this gateway ignore `reasoning_effort` entirely (low /
+  // minimal / none all still think — measured), so the only switch that stops
+  // the thinking stream is chat_template_kwargs.enable_thinking.
+  if (!args.transformBody && args.thinking === false) {
+    body.chat_template_kwargs = { enable_thinking: false };
+  }
+
   // Stream text-only chat completions to keep reverse-proxies active during reasoning
   if (!args.transformBody && isTextOnlyRequest(args.messages)) {
     body.stream = true;
@@ -530,9 +537,56 @@ function extractUsage(raw: unknown): ChatResult['usage'] {
   return { promptTokens, completionTokens };
 }
 
+/**
+ * Prints streamed reasoning in chunks instead of swallowing it.
+ *
+ * Reasoning-only deltas are the whole output for minutes at a time on large
+ * prompts (one 20-candidate reviewer call streamed ~1 MB over 13 minutes), so
+ * without this the run looks identical to a hang. Observation only: no abort,
+ * no loop detection, no deadline.
+ */
+function createReasoningPrinter(context?: { stage: string; task: string }) {
+  const FLUSH_CHARS = 240;
+  const FLUSH_MS = 3_000;
+  const label = context ? `${context.stage}/${context.task}` : 'llm';
+
+  let pending = '';
+  let streamedChars = 0;
+  let lastFlushAt = Date.now();
+  const startedAt = Date.now();
+
+  const flush = (force: boolean): void => {
+    if (!pending) return;
+    if (!force && pending.length < FLUSH_CHARS && Date.now() - lastFlushAt < FLUSH_MS) return;
+    const elapsed = ((Date.now() - startedAt) / 1000).toFixed(0);
+    const body = pending
+      .replace(/\s+$/, '')
+      .split('\n')
+      .map((line) => `  ${line}`)
+      .join('\n');
+    console.log(
+      `[llm] 🧠 reasoning ${streamedChars.toLocaleString('en-US')} chars / ${elapsed}s (${label})\n${body}`,
+    );
+    pending = '';
+    lastFlushAt = Date.now();
+  };
+
+  return {
+    push(text: string): void {
+      pending += text;
+      streamedChars += text.length;
+      flush(false);
+    },
+    end(): void {
+      flush(true);
+    },
+  };
+}
+
 async function parseSseChatResponse(
   response: Response,
   modelName: string,
+  context?: { stage: string; task: string },
 ): Promise<ChatResult> {
   const reader = response.body?.getReader();
   if (!reader) {
@@ -545,6 +599,7 @@ async function parseSseChatResponse(
   let reasoning = '';
   let usage: ChatResult['usage'] = null;
   let resolvedModel = modelName;
+  const reasoningPrinter = createReasoningPrinter(context);
 
   try {
     while (true) {
@@ -577,6 +632,10 @@ async function parseSseChatResponse(
             }
             if (typeof delta.reasoning_content === 'string') {
               reasoning += delta.reasoning_content;
+              reasoningPrinter.push(delta.reasoning_content);
+            } else if (typeof delta.reasoning === 'string') {
+              reasoning += delta.reasoning;
+              reasoningPrinter.push(delta.reasoning);
             }
           }
         } catch {
@@ -587,6 +646,7 @@ async function parseSseChatResponse(
   } finally {
     reader.releaseLock();
   }
+  reasoningPrinter.end();
 
   let finalContent: string;
   if (content.trim().length > 0) {
