@@ -231,7 +231,7 @@ npm run aigc -- xhot --help
 ### 5. 运行 flowTutor
 
 ```bash
-# 默认查询（与旧 ytbhot 一致）
+# 默认查询
 npm run pipeline:flowTutor
 
 # 指定查询

@@ -128,7 +128,7 @@ test('notifyError still delivers to Telegram when the Pi inbound is unreachable'
 });
 
 /**
- * Regression guard for the actual bug: the flowTutor (ex-ytbhot) failure branch (and friends)
+ * Regression guard for the actual bug: the flowTutor failure branch (and friends)
  * called `sendMsg(...)` — Telegram only — so the Pi agent never learned about
  * the failure. Error alerts must go through `notifyError` (dual channel).
  */
