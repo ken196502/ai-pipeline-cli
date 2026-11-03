@@ -484,6 +484,7 @@ export async function executeFlowTutorVideo(
     fasteval: {
       enabled: true,
       gridImagePath: fastEvalResult.gridImagePath,
+      winnerCoverPath: fastEvalResult.winnerCoverPath,
       winnerIndex: fastEvalResult.winnerIndex,
       winnerVideoId: fastEvalResult.winner.videoId,
       winnerTitle: fastEvalResult.winner.title,
@@ -759,16 +760,14 @@ export async function executeFlowTutorVideo(
     tutorial: tutorialSummary,
     reportJsonPath: path.join(outDir, 'final-report.json'),
     reportMarkdownPath: path.join(outDir, 'FINAL_REPORT.md'),
-    reportHtmlPath: path.join(outDir, 'FINAL_REPORT.html'),
     outDir,
   };
 
-  const { jsonPath, markdownPath, htmlPath } = await saveFinalReports(intermediateResult, outDir);
-  recordStage('report', 'completed', Date.now() - stage13Start, 'Generated FINAL_REPORT.md, FINAL_REPORT.html and final-report.json');
+  const { jsonPath, markdownPath } = await saveFinalReports(intermediateResult, outDir);
+  recordStage('report', 'completed', Date.now() - stage13Start, 'Generated FINAL_REPORT.md and final-report.json');
 
   intermediateResult.reportJsonPath = jsonPath;
   intermediateResult.reportMarkdownPath = markdownPath;
-  intermediateResult.reportHtmlPath = htmlPath;
 
   const manifestPath = path.join(outDir, 'manifest.json');
   intermediateResult.manifestPath = manifestPath;

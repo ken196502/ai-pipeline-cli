@@ -93,7 +93,9 @@ export async function checkEnvStage(
     const notifications = verifyNotificationConfig();
     logger?.info(
       `Stage 1: Verified notification channels: bot=${notifications.bot}, chat=${notifications.notifyTo}, ` +
-        `webhook=${notifications.webhookUrl}, pi-inbound=${notifications.inboundUrl}`
+        `webhook=${notifications.webhookUrl}, pi-inbound=${notifications.inboundUrl}, ` +
+        `error-bot=${notifications.errorBot}, error-pi-inbound=${notifications.errorInboundUrl}, ` +
+        `result-targets=${notifications.resultTargets}, error-targets=${notifications.errorTargets}`
     );
   }
 

@@ -37,6 +37,7 @@ import { AppError } from './errors.js';
 import { isLlmUnavailableError, notifyLlmUnavailableAndExit } from '../utils/send_msg.js';
 import { attachMetricThresholdOptions, parseMetricThresholdOptions } from './cli/options.js';
 import { runFastEval, toFastEvalData } from './fasteval/index.js';
+import { generateRunId } from '../utils/run.js';
 
 const program = new Command();
 
@@ -90,11 +91,14 @@ program
     try {
       const metricThresholds = parseMetricThresholdOptions(opts);
 
+      // One run directory shared by fasteval and the research pipeline.
+      const outDir = opts.outDir ? path.resolve(opts.outDir) : path.resolve('artifacts', 'research', generateRunId('research'));
+
       const fastEvalResult = await runFastEval({
         query: opts.query,
         topic: opts.topic,
         candidateCount: opts.maxCandidates,
-        outDir: path.resolve(opts.outDir || 'artifacts', 'fasteval'),
+        outDir,
         onProgress: (stage, detail) => {
           const label = stageSpinners[stage] || stage;
           console.log(`${pc.green('✔')} [${pc.bold(label)}] ${detail || ''}`);
@@ -106,7 +110,7 @@ program
         topic: opts.topic,
         language: opts.language,
         maxCandidates: opts.maxCandidates,
-        outputDir: opts.outDir,
+        outputDir: outDir,
         cookiePath: opts.cookiePath,
         proxyUrl: opts.proxy === false ? 'none' : opts.proxyUrl,
         model: opts.model,
@@ -150,7 +154,6 @@ program
       }
 
       console.log(pc.bold('\nArtifacts Persisted:'));
-      const outDir = opts.outDir || path.resolve('artifacts', execution.result.runId);
       const artifacts = [
         RESEARCH_RESULT_FILENAME,
         EVALUATION_STANDARD_FILENAME,

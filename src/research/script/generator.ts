@@ -10,8 +10,7 @@
  */
 import { AppError, ErrorCodes } from '../errors.js';
 import { getEnvConfig, type EnvConfig } from '../../env.js';
-import { chat, LLMError } from '../../llm/client.js';
-import { extractJsonObject } from '../../llm/json.js';
+import { chatJsonObject } from '../llm/json-chat.js';
 import { notifyLlmUnavailableAndExit } from '../../utils/send_msg.js';
 import type { ResearchResult, Segment, Transcript, VlExtractedPrompt } from '../contracts.js';
 import {
@@ -433,9 +432,9 @@ export async function reorchestrateExtractedPrompts(
       visualStyle: params.visualStyle,
     });
 
-    let response;
+    let value: unknown;
     try {
-      response = await chat(
+      ({ value } = await chatJsonObject(
         {
           messages: [
             { role: 'system', content: systemPrompt },
@@ -445,11 +444,12 @@ export async function reorchestrateExtractedPrompts(
           context: { stage: 'script', task: 'reorchestrate-prompts' },
           temperature: 0.2,
           timeoutMs: 300_000,
+          task: 'prompt re-orchestration',
         },
         env
-      );
+      ));
     } catch (chatErr: any) {
-      const appErr = new AppError({
+      const appErr = chatErr instanceof AppError ? chatErr : new AppError({
         code: ErrorCodes.LLM_REQUEST_FAILED,
         message: `LLM prompt re-orchestration failed: ${chatErr.message}. Fallback is forbidden to prevent masking problems.`,
         stage: 'research',
@@ -461,20 +461,7 @@ export async function reorchestrateExtractedPrompts(
       throw appErr;
     }
 
-    const extracted = extractJsonObject(response.content);
-    if (!extracted.ok || !extracted.value || typeof extracted.value !== 'object') {
-      const parseErr = new AppError({
-        code: ErrorCodes.LLM_RESPONSE_INVALID,
-        message: `Failed to parse structured JSON from LLM prompt re-orchestration: ${response.content.slice(0, 300)}`,
-        stage: 'research',
-        task: 'reorchestrate-prompts',
-        retryable: false,
-      });
-      await notifyLlmUnavailableAndExit(parseErr, { stage: 'research', task: 'reorchestrate-prompts', context: 'Prompt Re-orchestration Response' });
-      throw parseErr;
-    }
-
-    const val = extracted.value as {
+    const val = value as {
       hasNarration?: string | boolean;
       clips?: unknown[];
       characters?: Record<string, string>;

@@ -6,6 +6,21 @@ import { probeDurationSec } from './tts.js';
 import { buildFrameGrid, extractFrameAt, formatTimestamp, type ExtractedFrame } from '../research/media/frames.js';
 
 /**
+ * Picks the column count that tiles `count` frames exactly (no blank cells),
+ * choosing the factor pair closest to the aspect-ratio-ideal column count.
+ */
+function exactColumns(count: number, aspectRatio: number): number | undefined {
+  const ideal = Math.sqrt(count * Math.max(0.1, aspectRatio));
+  let best: number | undefined;
+  for (let columns = 1; columns <= Math.min(16, count); columns += 1) {
+    if (count % columns !== 0) continue;
+    if (count / columns > 16) continue;
+    if (best === undefined || Math.abs(columns - ideal) < Math.abs(best - ideal)) best = columns;
+  }
+  return best;
+}
+
+/**
  * Samples frames across the final tutorial video and builds the contact-sheet grid (grid 拼图).
  * When finalShowcaseRange is present, allocates dedicated grid slots (e.g. the entire bottom row)
  * specifically to sample the final AI video showcase, ensuring the final generated video is
@@ -14,12 +29,13 @@ import { buildFrameGrid, extractFrameAt, formatTimestamp, type ExtractedFrame } 
 export async function createTutorialGrid(params: {
   videoPath: string;
   outPath: string;
-  /** Number of frames on the grid (default 12). */
+  /** Number of frames on the grid (default 24 — doubled from the original 12 so the
+   *  delivered contact sheet shows twice as many steps of the tutorial). */
   count?: number;
   /** Timestamp range of the final video showcase in the rendered tutorial. */
   finalShowcaseRange?: { startSec: number; durationSec: number };
 }): Promise<{ gridPath: string; frameCount: number }> {
-  const count = params.count ?? 12;
+  const count = params.count ?? 24;
   const durationSec = await probeDurationSec(params.videoPath);
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tutorial-grid-'));
   try {
@@ -29,8 +45,8 @@ export async function createTutorialGrid(params: {
     if (params.finalShowcaseRange && params.finalShowcaseRange.durationSec > 0.5) {
       const { startSec, durationSec: showcaseDur } = params.finalShowcaseRange;
       const endSec = Math.min(durationSec, startSec + showcaseDur);
-      // Allocate dedicated showcase slots (e.g. 4 frames out of 12 for a 3x4 grid)
-      const showcaseCount = Math.max(2, Math.min(4, Math.floor(count / 3)));
+      // Allocate dedicated showcase slots (e.g. 8 frames out of 24)
+      const showcaseCount = Math.max(2, Math.min(8, Math.floor(count / 3)));
       const tutorialCount = count - showcaseCount;
 
       // Sample tutorial workflow/prompt steps up to the showcase start
@@ -69,7 +85,9 @@ export async function createTutorialGrid(params: {
         height,
       });
     }
-    const { buffer } = await buildFrameGrid(frames, frames[0].width, frames[0].height, 2400);
+    const { buffer } = await buildFrameGrid(frames, frames[0].width, frames[0].height, 2400, {
+      columns: exactColumns(frames.length, frames[0].width / frames[0].height),
+    });
     const finalBuffer = /\.(jpe?g)$/i.test(params.outPath)
       ? await sharp(buffer).jpeg({ quality: 90 }).toBuffer()
       : buffer;

@@ -2383,7 +2383,7 @@ export function isTransientGenerationError(message: string): boolean {
   // The frame-picker / video-mode-control errors are transient UI states: the
   // prompt box may still render (or still be recovering from the previous step)
   // when the code looks for them — a page refresh re-renders the controls.
-  return (/something went wrong|failed to generate|generation rejected|try again|could not find "(?:start|end)" frame button|asset picker overlay did not open|could not click matching asset|video mode controls did not render/i.test(
+  return (/something went wrong|failed to generate|generation rejected|try again|timed out after \d+s waiting for new image tile|could not find "(?:start|end)" frame button|asset picker overlay did not open|could not click matching asset|video mode controls did not render/i.test(
     message || ''
   ));
 }
@@ -4367,11 +4367,13 @@ export async function waitForAnimateEditor(
 export async function waitForNewImageTile(
   page: Page,
   baseline: number | Set<string>,
-  timeoutMs: number = 120_000,
+  timeoutMs: number = 180_000,
   failureBaseline?: FlowFailureState
 ): Promise<FlowImageTile> {
   const deadline = Date.now() + timeoutMs;
   let pollCount = 0;
+  let lastRefresh = Date.now();
+  const REFRESH_INTERVAL_MS = 75_000;
 
   while (Date.now() < deadline) {
     const errorText = await page.evaluate(() => {
@@ -4419,119 +4421,201 @@ export async function waitForNewImageTile(
       }).catch(() => {});
     }
 
-    const state = (await page.evaluate(`(() => {
-      ${MEDIA_TILE_HELPERS}
-      const baselineKeys = ${
-        baseline instanceof Set
-          ? `new Set(${JSON.stringify([...baseline])})`
-          : 'null'
-      };
-      const baselineCount = ${baseline instanceof Set ? -1 : Number(baseline)};
+    const checkState = async () => {
+      return (await page.evaluate(`(() => {
+        ${MEDIA_TILE_HELPERS}
+        const baselineKeys = ${
+          baseline instanceof Set
+            ? `new Set(${JSON.stringify([...baseline])})`
+            : 'null'
+        };
+        const baselineCount = ${baseline instanceof Set ? -1 : Number(baseline)};
 
-      const pendingTiles = document.querySelectorAll('flow-pending-tile, [class*="pending-tile"]');
-      const stopBtn = document.querySelector('.stop-icon-button, button[aria-label="Stop"]');
-      const hasPending = pendingTiles.length > 0 || !!stopBtn;
+        const pendingTiles = document.querySelectorAll('flow-pending-tile, [class*="pending-tile"]');
+        const stopBtn = document.querySelector('.stop-icon-button, button[aria-label="Stop"]');
+        const hasPending = pendingTiles.length > 0 || !!stopBtn;
 
-      const cards = collectCards();
-      const imageCards = cards.filter((c) => c.kind === 'image');
+        const cards = collectCards();
+        const imageCards = cards.filter((c) => c.kind === 'image');
 
-      // Fresh = image cards that appeared after the baseline was taken.
-      // Identity is judged by CANONICAL tokens (media UUID / origin+path, query stripped):
-      // the canvas recycles tile elements, so a wrapper's data-media-id attribute can
-      // be STALE while the <img src> already shows a different (new) media. The actual
-      // image displayed (<img src>) is the ground truth.
-      const baselineTokens = new Set();
-      if (baselineKeys) {
-        for (const k of baselineKeys) {
-          for (const t of identityTokens(k)) baselineTokens.add(String(t).toLowerCase());
-        }
-      }
-
-      function isKnownCard(c) {
-        if (!baselineKeys) return false;
-        const img = c.el.querySelector('img');
-        const src = img && img.src;
-        // 1. Primary content signal: the actual image displayed inside the card.
-        // If the card has a rendered <img>, its content identity (media UUID or URL)
-        // trumps any wrapper attribute (virtualized lists recycle wrapper DOM elements).
-        if (src && !src.startsWith('blob:') && !src.startsWith('data:')) {
-          const m = src.match(UUID_RE);
-          if (m) {
-            return baselineTokens.has(m[0].toLowerCase());
+        const baselineTokens = new Set();
+        if (baselineKeys) {
+          for (const k of baselineKeys) {
+            for (const t of identityTokens(k)) baselineTokens.add(String(t).toLowerCase());
           }
-          try {
-            const p = new URL(src, location.href);
-            if (baselineTokens.has((p.origin + p.pathname).toLowerCase())) return true;
-          } catch {}
-          if (baselineTokens.has(src.split('?')[0].toLowerCase())) return true;
+        }
+
+        function isKnownCard(c) {
+          if (!baselineKeys) return false;
+          const img = c.el.querySelector('img');
+          const src = img && img.src;
+          if (src && !src.startsWith('blob:') && !src.startsWith('data:')) {
+            const m = src.match(UUID_RE);
+            if (m) {
+              return baselineTokens.has(m[0].toLowerCase());
+            }
+            try {
+              const p = new URL(src, location.href);
+              if (baselineTokens.has((p.origin + p.pathname).toLowerCase())) return true;
+            } catch {}
+            if (baselineTokens.has(src.split('?')[0].toLowerCase())) return true;
+            return false;
+          }
+          if (c.key) {
+            const m = String(c.key).match(UUID_RE);
+            if (m && baselineTokens.has(m[0].toLowerCase())) return true;
+            if (baselineTokens.has(String(c.key).toLowerCase())) return true;
+          }
+          const mediaId = c.el.getAttribute('data-media-id');
+          if (mediaId && baselineTokens.has(mediaId.toLowerCase())) return true;
           return false;
         }
-        // 2. Element key signal (if image src not yet available or has no UUID)
-        if (c.key) {
-          const m = String(c.key).match(UUID_RE);
-          if (m && baselineTokens.has(m[0].toLowerCase())) return true;
-          if (baselineTokens.has(String(c.key).toLowerCase())) return true;
-        }
-        const mediaId = c.el.getAttribute('data-media-id');
-        if (mediaId && baselineTokens.has(mediaId.toLowerCase())) return true;
-        return false;
-      }
 
-      const fresh = imageCards.filter((c) => {
-        if (baselineKeys) {
-          return !isKnownCard(c);
-        }
-        return imageCards.length > baselineCount;
-      });
+        const fresh = imageCards.filter((c) => {
+          if (baselineKeys) {
+            return !isKnownCard(c);
+          }
+          return imageCards.length > baselineCount;
+        });
 
-      // Check the fresh cards for completion (newest first).
-      const readyCard = fresh.slice().reverse().find((c) => {
-        const img = c.el.querySelector('img');
-        const hasSrc = !!(img && img.src && (img.src.startsWith('http') || img.src.startsWith('data:')));
-        const text = c.el.innerText || '';
-        const hasProgress = /\\b\\d+%\\b/.test(text);
-        return hasSrc && !hasProgress;
-      }) || null;
+        const readyCard = fresh.slice().reverse().find((c) => {
+          const img = c.el.querySelector('img');
+          const hasSrc = !!(img && img.src && (img.src.startsWith('http') || img.src.startsWith('data:')));
+          const text = c.el.innerText || '';
+          const hasProgress = /\\b\\d+%\\b/.test(text);
+          return hasSrc && !hasProgress;
+        }) || null;
 
-      return {
-        ready: !!readyCard && !hasPending,
-        count: imageCards.length,
-        totalCount: cards.length,
-        hasPending,
-        card: readyCard ? {
-          index: imageCards.indexOf(readyCard),
-          kind: 'image',
-          key: readyCard.key,
-          mediaId:
-            readyCard.el.getAttribute('data-media-id') ||
-            (readyCard.el.querySelector('img') || { getAttribute: () => null }).getAttribute('data-media-id') ||
-            null,
-          src: (readyCard.el.querySelector('img') || { src: null }).src || null,
-          alt: (readyCard.el.querySelector('img') || { alt: null }).alt || readyCard.el.getAttribute('aria-label') || null,
-          rect: (() => {
-            const r = readyCard.el.getBoundingClientRect();
-            return {
-              x: Math.round(r.x),
-              y: Math.round(r.y),
-              width: Math.round(r.width),
-              height: Math.round(r.height),
-            };
-          })(),
-        } : null,
+        return {
+          ready: !!readyCard && !hasPending,
+          count: imageCards.length,
+          totalCount: cards.length,
+          hasPending,
+          card: readyCard ? {
+            index: imageCards.indexOf(readyCard),
+            kind: 'image',
+            key: readyCard.key,
+            mediaId:
+              readyCard.el.getAttribute('data-media-id') ||
+              (readyCard.el.querySelector('img') || { getAttribute: () => null }).getAttribute('data-media-id') ||
+              null,
+            src: (readyCard.el.querySelector('img') || { src: null }).src || null,
+            alt: (readyCard.el.querySelector('img') || { alt: null }).alt || readyCard.el.getAttribute('aria-label') || null,
+            rect: (() => {
+              const r = readyCard.el.getBoundingClientRect();
+              return {
+                x: Math.round(r.x),
+                y: Math.round(r.y),
+                width: Math.round(r.width),
+                height: Math.round(r.height),
+              };
+            })(),
+          } : null,
+        };
+      })()`)) as {
+        ready: boolean;
+        count: number;
+        totalCount: number;
+        hasPending: boolean;
+        card: FlowImageTile | null;
       };
-    })()`)) as {
-      ready: boolean;
-      count: number;
-      totalCount: number;
-      hasPending: boolean;
-      card: FlowImageTile | null;
     };
 
+    const state = await checkState();
     if (state.ready && state.card) {
       return state.card as FlowImageTile;
     }
 
+    // Periodic force-refresh to sync server-side image generation if frontend DOM has stalled
+    if (Date.now() - lastRefresh >= REFRESH_INTERVAL_MS && Date.now() + 15_000 < deadline) {
+      lastRefresh = Date.now();
+      const currentUrl = page.url();
+      if (currentUrl && currentUrl.includes('/project/')) {
+        console.log(
+          picocolors.yellow(
+            `[flow-dom] Waited ${Math.round((Date.now() - (deadline - timeoutMs)) / 1000)}s without image card; refreshing page to synchronize server-side status...`
+          )
+        );
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 });
+          await new Promise((r) => setTimeout(r, 3000));
+          await scrollToBottomToLoadAll(page, { maxScrolls: 5, timeoutMs: 5_000 }).catch(() => {});
+          const refreshedState = await checkState();
+          if (refreshedState.ready && refreshedState.card) {
+            console.log(picocolors.green('[flow-dom] Rescued new image card after page synchronization!'));
+            return refreshedState.card as FlowImageTile;
+          }
+        } catch {
+          // Continue polling on error
+        }
+      }
+    }
+
     await new Promise((r) => setTimeout(r, 1500));
+  }
+
+  // Final rescue: reload once before throwing
+  try {
+    const currentUrl = page.url();
+    if (currentUrl && currentUrl.includes('/project/')) {
+      console.log(picocolors.yellow('[flow-dom] Reached timeout; attempting final page reload rescue for image tile...'));
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await new Promise((r) => setTimeout(r, 3000));
+      await scrollToBottomToLoadAll(page, { maxScrolls: 8, timeoutMs: 8_000 }).catch(() => {});
+      const finalState = (await page.evaluate(`(() => {
+        ${MEDIA_TILE_HELPERS}
+        const baselineKeys = ${
+          baseline instanceof Set
+            ? `new Set(${JSON.stringify([...baseline])})`
+            : 'null'
+        };
+        const cards = collectCards();
+        const imageCards = cards.filter((c) => c.kind === 'image');
+        const baselineTokens = new Set();
+        if (baselineKeys) {
+          for (const k of baselineKeys) {
+            for (const t of identityTokens(k)) baselineTokens.add(String(t).toLowerCase());
+          }
+        }
+        function isKnownCard(c) {
+          if (!baselineKeys) return false;
+          const img = c.el.querySelector('img');
+          const src = img && img.src;
+          if (src && !src.startsWith('blob:') && !src.startsWith('data:')) {
+            const m = src.match(UUID_RE);
+            if (m) return baselineTokens.has(m[0].toLowerCase());
+            try {
+              const p = new URL(src, location.href);
+              if (baselineTokens.has((p.origin + p.pathname).toLowerCase())) return true;
+            } catch {}
+            if (baselineTokens.has(src.split('?')[0].toLowerCase())) return true;
+            return false;
+          }
+          return false;
+        }
+        const fresh = imageCards.filter((c) => !isKnownCard(c));
+        const readyCard = fresh.slice().reverse().find((c) => {
+          const img = c.el.querySelector('img');
+          return !!(img && img.src && (img.src.startsWith('http') || img.src.startsWith('data:')));
+        }) || null;
+        return readyCard ? {
+          index: imageCards.indexOf(readyCard),
+          kind: 'image',
+          key: readyCard.key,
+          mediaId: readyCard.el.getAttribute('data-media-id') || null,
+          src: (readyCard.el.querySelector('img') || { src: null }).src || null,
+          alt: (readyCard.el.querySelector('img') || { alt: null }).alt || null,
+          rect: { x: 0, y: 0, width: 0, height: 0 },
+        } : null;
+      })()`)) as FlowImageTile | null;
+
+      if (finalState && finalState.src) {
+        console.log(picocolors.green('[flow-dom] Rescued new image card after final refresh!'));
+        return finalState;
+      }
+    }
+  } catch {
+    // Fall through to error
   }
 
   throw new Error(

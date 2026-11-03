@@ -297,7 +297,9 @@ export async function handleFlowTutorCommand(queryArg: string | undefined, opts:
         process.exitCode = 1;
       }
     } else {
-      // Notify on success: summary message + self-contained HTML report attachment
+      // Notify on success: summary caption + winning cover + tutorial grid.
+      // (The self-contained HTML report was dropped: the cover and the final
+      // tutorial contact sheet are what a human actually wants to look at.)
       const winner = result.evaluation.winner;
       const minutes = (result.totalDurationMs / 60000).toFixed(1);
       const msgLines = [
@@ -315,13 +317,31 @@ export async function handleFlowTutorCommand(queryArg: string | undefined, opts:
       ];
       // Telegram captions are limited to 1024 chars — truncate deterministically.
       const caption = msgLines.join('\n').slice(0, 1000);
-      await sendMsg(caption, undefined, {
-        filePath: result.reportHtmlPath,
-        fileName: 'FINAL_REPORT.html',
-        mimetype: 'text/html',
-      }).catch((e) => {
+      const coverPath = result.evaluation.fasteval?.winnerCoverPath;
+      const gridPath = result.tutorial?.gridPath;
+
+      await sendMsg(
+        caption,
+        undefined,
+        coverPath
+          ? { filePath: coverPath, fileName: 'winner-cover.jpg', mimetype: 'image/jpeg' }
+          : undefined
+      ).catch((e) => {
         console.error(pc.yellow(`[webhook] Warning: Failed to send success notification: ${e.message}`));
       });
+
+      if (gridPath) {
+        const gridCaption = `🖼 Tutorial video grid — ${result.tutorial?.sceneCount ?? 0} scenes, ${result.tutorial?.totalDurationSec.toFixed(0)}s`;
+        await sendMsg(gridCaption, undefined, {
+          filePath: gridPath,
+          fileName: 'tutorial-grid.jpg',
+          mimetype: 'image/jpeg',
+        }).catch((e) => {
+          console.error(pc.yellow(`[webhook] Warning: Failed to send tutorial grid: ${e.message}`));
+        });
+      } else {
+        console.warn(pc.yellow('[webhook] No tutorial grid available — skipping grid delivery'));
+      }
     }
   } catch (err: any) {
     // The registry enriches fatal errors with the real run directory — prefer it

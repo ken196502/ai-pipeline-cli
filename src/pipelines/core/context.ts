@@ -45,7 +45,7 @@ export async function createDefaultExecutionContext(
   } = {}
 ): Promise<PipelineExecutionContext> {
   const runId = options.runId || generateRunId(pipelineId);
-  const outDir = await ensureOutputDir(customOutDir, runId);
+  const outDir = await ensureOutputDir(customOutDir, runId, pipelineId.toLowerCase());
   const logger = createRunLogger({
     runId,
     logDir: outDir,
@@ -115,16 +115,12 @@ export async function createDefaultExecutionContext(
     if (md) {
       markdownPath = path.join(outDir, 'FINAL_REPORT.md');
       await fs.writeFile(markdownPath, md, 'utf-8');
-      const legacyMd = path.join(outDir, 'report.md');
-      await fs.writeFile(legacyMd, md, 'utf-8').catch(() => {});
     }
 
     if (json !== undefined) {
       jsonPath = path.join(outDir, 'final-report.json');
       const serialized = typeof json === 'string' ? json : JSON.stringify(json, null, 2);
       await fs.writeFile(jsonPath, serialized, 'utf-8');
-      const legacyJson = path.join(outDir, 'result.json');
-      await fs.writeFile(legacyJson, serialized, 'utf-8').catch(() => {});
     }
 
     return { markdownPath, jsonPath };

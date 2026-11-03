@@ -199,10 +199,10 @@ program
   .option('--cookie-path <path>', 'Path to cookies.txt for yt-dlp authentication')
   .option('--proxy-url <url>', 'Proxy URL (HTTP/HTTPS/SOCKS5) for yt-dlp')
   .option('--no-proxy', 'Disable proxy for yt-dlp requests and connect directly')
-  .option('--artifacts-dir <path>', 'Output directory for run artifacts (default: artifacts/search-<runId>/)')
+  .option('--artifacts-dir <path>', 'Output directory for run artifacts (default: artifacts/research/<runId>/)')
   .action(async (opts) => {
     const runId = generateRunId('search');
-    const outDir = await ensureOutputDir(opts.artifactsDir, runId);
+    const outDir = await ensureOutputDir(opts.artifactsDir, runId, 'research');
 
     const logger = createRunLogger({
       runId,

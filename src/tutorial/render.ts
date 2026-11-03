@@ -294,7 +294,7 @@ export function resolveRenderConcurrency(cpuCount: number, override?: number): n
  * the expected cost; override with TUTORIAL_FRAME_TIMEOUT_MS.
  */
 export function resolveFrameTimeoutMs(override?: number): number {
-  return override !== undefined && Number.isFinite(override) && override > 0 ? Math.floor(override) : 30_000;
+  return override !== undefined && Number.isFinite(override) && override > 0 ? Math.floor(override) : 60_000;
 }
 
 /**

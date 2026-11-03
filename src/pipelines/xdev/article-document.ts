@@ -223,7 +223,7 @@ export function parseMarkdownToBlocks(markdown: string): ArticleDocument {
   }
 
   flushAll();
-  return { title: title || '未命名长文', blocks };
+  return { title: title || 'Untitled Article', blocks };
 }
 
 /**
@@ -241,7 +241,7 @@ export function buildArticleDocument(markdown: string, source?: ArticleSource): 
     const when = source.publishedAt ? `${source.publishedAt} · ` : '';
     blocks.push({
       type: 'paragraph',
-      text: `—— ${source.authorName}（@${source.authorHandle}），${when}原推文：${source.tweetUrl}`,
+      text: `—— ${source.authorName} (@${source.authorHandle}), ${when}Original Post: ${source.tweetUrl}`,
     });
     blocks.push({ type: 'divider' });
   }
@@ -249,14 +249,14 @@ export function buildArticleDocument(markdown: string, source?: ArticleSource): 
   blocks.push(...parsed.blocks);
 
   if (source) {
-    const items = [`原推文（@${source.authorHandle}）：${source.tweetUrl}`];
+    const items = [`Original post (@${source.authorHandle}): ${source.tweetUrl}`];
     for (const link of source.links || []) {
       if (!link.url || link.url === source.tweetUrl) continue;
       if (items.some((i) => i.includes(link.url))) continue;
-      items.push(link.title ? `${link.title}：${link.url}` : link.url);
+      items.push(link.title ? `${link.title}: ${link.url}` : link.url);
     }
     blocks.push({ type: 'divider' });
-    blocks.push({ type: 'heading', level: 2, text: '信源与延伸阅读' });
+    blocks.push({ type: 'heading', level: 2, text: 'Sources & Further Reading' });
     blocks.push({ type: 'list', ordered: false, items });
   }
 
@@ -295,6 +295,18 @@ export function validateDocument(doc: ArticleDocument, expectSource = false): st
   if (expectSource && !doc.blocks.some((b) => b.type === 'quote')) {
     issues.push('缺少推文引述块（信源缺失）');
   }
+
+  // Language gate: enforce 100% English across all generated blocks (headings, paragraphs, lists)
+  // Allow CJK characters only in raw author name if author has Chinese name in profile.
+  const plain = blocksToPlain(doc.blocks);
+  const cjkChars = (plain.match(/[\u4e00-\u9fff]/g) || []).length;
+  const nonSpaceChars = plain.replace(/\s/g, '').length;
+  if (nonSpaceChars > 0 && cjkChars / nonSpaceChars > 0.03) {
+    issues.push(
+      `文章文档包含过多中文残留（CJK 字符 ${cjkChars}/${nonSpaceChars}）：正文、引述与附录章节必须全部为纯英文`
+    );
+  }
+
   return issues;
 }
 

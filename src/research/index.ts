@@ -258,8 +258,10 @@ export async function runResearchPipeline(
     runId,
     logDir: effectiveOutputDir,
     title: 'VIDEO RESEARCH PIPELINE RUN LOG',
-    logFileName: RUN_LOG_FILENAME,
-    jsonlFileName: RUN_JSONL_FILENAME,
+    // Inside a parent pipeline run, share the parent's log files instead of
+    // creating a second run.log/run.jsonl pair next to pipeline.log/events.jsonl.
+    logFileName: parentRun ? 'pipeline.log' : RUN_LOG_FILENAME,
+    jsonlFileName: parentRun ? 'events.jsonl' : RUN_JSONL_FILENAME,
     onLog: (entry) => {
       if (entry.level === 'STAGE' && onProgress) {
         onProgress(entry.stage || 'stage', entry.message);

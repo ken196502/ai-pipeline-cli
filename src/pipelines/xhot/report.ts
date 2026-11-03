@@ -332,10 +332,6 @@ export async function saveFinalReports(
   await fs.writeFile(jsonPath, jsonContent, 'utf8');
   await fs.writeFile(htmlPath, htmlContent, 'utf8');
 
-  // Maintain backward-compatibility for existing consumers
-  await fs.writeFile(path.join(resolvedDir, 'report.md'), markdownContent, 'utf8');
-  await fs.writeFile(path.join(resolvedDir, 'result.json'), jsonContent, 'utf8');
-
   return { jsonPath, markdownPath, htmlPath };
 }
 

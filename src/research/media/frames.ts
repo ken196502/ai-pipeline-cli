@@ -394,11 +394,15 @@ export function calculateGridLayout(
   videoHeight: number,
   frameCount: number,
   maxGridSize = DEFAULT_MAX_GRID_SIZE,
+  /** Explicit column count (callers that must tile the grid exactly). */
+  forcedColumns?: number,
 ): GridLayout {
   const count = Math.max(1, Math.min(256, Math.round(frameCount)));
   const ratio = Math.max(0.1, (videoWidth || 16) / Math.max(1, videoHeight || 9));
 
-  let columns = Math.min(count, Math.max(1, Math.ceil(Math.sqrt(count * ratio))));
+  let columns = forcedColumns
+    ? Math.min(count, Math.min(16, Math.max(1, Math.round(forcedColumns))))
+    : Math.min(count, Math.max(1, Math.ceil(Math.sqrt(count * ratio))));
   let rows = Math.max(1, Math.ceil(count / columns));
   while (columns * rows < count) columns += 1;
   columns = Math.min(count, Math.min(16, columns));
@@ -1081,13 +1085,15 @@ export async function buildFrameGrid(
     /** Whether to apply second-pass sharpening to the assembled grid (default: true). */
     sharpen?: boolean | SharpenOptions;
     quality?: number;
+    /** Explicit column count so a frame count can tile the grid exactly. */
+    columns?: number;
   } = {},
 ): Promise<BuiltFrameGrid> {
   if (!frames.length) {
     throw new Error('Cannot build a contact-sheet collage without extracted frames');
   }
 
-  const layout = calculateGridLayout(videoWidth, videoHeight, frames.length, maxGridSize);
+  const layout = calculateGridLayout(videoWidth, videoHeight, frames.length, maxGridSize, options.columns);
   const gap = 2;
   const overlays: OverlayOptions[] = [];
 

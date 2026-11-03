@@ -5,13 +5,13 @@
  * mirroring the chat() wrapper in src/research/llm/client.ts.
  */
 import { chatJsonObject as publicChatJsonObject } from '../../llm/json-chat.js';
-import type { ChatRequest } from '../../llm/types.js';
+import type { ChatJsonObjectOptions } from '../../llm/json-chat.js';
 import { LLMError } from '../../llm/client.js';
 import { AppError, ErrorCodes } from '../errors.js';
 import type { EnvConfig } from '../../env.js';
 
 export async function chatJsonObject(
-  req: Omit<ChatRequest, 'responseFormat'>,
+  req: ChatJsonObjectOptions,
   customConfig?: EnvConfig,
 ): Promise<{ value: unknown }> {
   const context = req.context ?? { stage: 'research', task: 'json-chat' };

@@ -371,12 +371,12 @@ async function main() {
     ]);
     console.log('Narration muxed: ' + outVideoPath);
 
-    const gridCount = Math.min(12, totalFrames);
+    const gridCount = Math.min(24, totalFrames);
     console.log('Building ' + gridCount + '-frame contact sheet grid...');
     await execFileAsync('ffmpeg', [
       '-y',
       '-i', outVideoPath,
-      '-vf', 'fps=' + gridCount + '/' + timeline.totalDurationSec.toFixed(6) + ',scale=800:-2,tile=3x4',
+      '-vf', 'fps=' + gridCount + '/' + timeline.totalDurationSec.toFixed(6) + ',scale=800:-2,tile=4x6',
       '-frames:v', '1',
       '-q:v', '3',
       gridPath,

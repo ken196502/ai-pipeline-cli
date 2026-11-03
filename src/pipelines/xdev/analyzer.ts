@@ -12,6 +12,7 @@ export { buildHeaderBannerSvg, buildArchitectureSvg, buildSequenceSvg };
 export interface SelectedTopicAnalysis {
   tweet: ExtractedTweet;
   topicTitle: string;
+  topicTitleEn?: string;
   sourceIdentityZh: string;
   corePerspectiveZh: string;
   articleSummaryZh?: string;
@@ -116,7 +117,8 @@ ${candidateList}
   "topics": [
     {
       "index": 0,
-      "topicTitle": "该议题的核心技术论断",
+      "topicTitle": "该议题的核心技术论断（中文）",
+      "topicTitleEn": "Concise engineering topic phrase in English (for diagrams and visual asset generation)",
       "sourceIdentityZh": "客观中立的信源身份定位",
       "corePerspectiveZh": "作者的核心工程主张与深入拆解（纯中文，绝不包含'其背后的工程分析非常尖锐'等废话，直接说事实、机制与数据）"
     }
@@ -164,7 +166,8 @@ ${candidateList}
   "topics": [
     {
       "index": 0,
-      "topicTitle": "该议题的核心技术论断",
+      "topicTitle": "该议题的核心技术论断（中文）",
+      "topicTitleEn": "Concise engineering topic phrase in English (for diagrams and visual asset generation)",
       "sourceIdentityZh": "客观中立的信源身份定位",
       "corePerspectiveZh": "核心工程主张与拆解（中文，直接说事实、机制与数据）"
     }
@@ -299,9 +302,14 @@ export async function evaluateAndSelectCoreThemes(
         throw new Error(`LLM 选题结果缺少必需字段: ${missing.join(', ')}（禁止兜底填充）`);
       }
 
+      const topicTitleEn = typeof topicInfo.topicTitleEn === 'string' && topicInfo.topicTitleEn.trim()
+        ? topicInfo.topicTitleEn.trim()
+        : undefined;
+
       selectedTopics.push({
         tweet,
         topicTitle: topicInfo.topicTitle.trim(),
+        topicTitleEn,
         sourceIdentityZh: topicInfo.sourceIdentityZh.trim(),
         corePerspectiveZh: topicInfo.corePerspectiveZh.trim(),
       });

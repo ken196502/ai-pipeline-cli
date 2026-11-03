@@ -117,6 +117,13 @@ async function withTransportRetry<T>(label: string, run: () => Promise<T>): Prom
 export async function generateImageFromEnv(
   options: ImageGenerationOptions
 ): Promise<ImageGenerationResult> {
+  const cjkChars = (options.prompt.match(/[\u4e00-\u9fff]/g) || []).length;
+  if (cjkChars > 0) {
+    throw new Error(
+      `[image-generator] Prompt contains Chinese characters (${cjkChars} CJK found). Prompts must be 100% English to prevent generated images from rendering Chinese text.`
+    );
+  }
+
   const config = getEnvConfig();
   const imageModel = config.imageModel || process.env.IMAGE_MODEL || 'sensenova-u1.5-fast';
   const baseUrl = config.baseUrl.replace(/\/+$/, '');

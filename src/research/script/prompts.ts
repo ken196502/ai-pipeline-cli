@@ -962,11 +962,20 @@ CRITICAL IN-UNIVERSE CREATIVE STORYTELLING PRINCIPLES:
      * Describes how the scene moves and evolves FROM the opening imagePrompt ONWARD to the end of the clip.
 ${POLICY_AVOIDANCE_GUIDELINES}
 ${CONTENT_SAFETY_GUIDELINES}
-3. MASTER CHARACTER & SCENE SCALE CONSISTENCY RULE ({character1} + {background1}):
-   - In any narrative featuring recurrent characters or creatures, you MUST define each character in the top-level "characters" dictionary, ALWAYS including its ABSOLUTE SIZE/BUILD (e.g. "character1": "1.8 m tall athletic adult male, detailed fixed appearance, age, gender, ethnicity, facial features, hair, eye color, and exact clothing from head to toe").
-   - You MUST ALSO define each recurring location/set in the top-level "backgrounds" dictionary, ALWAYS including its ABSOLUTE DIMENSIONS and scale landmarks in the SAME unit (e.g. "background1": "massive sound-stage interior, 30 m ceiling height, 2.4 m tall steel doors, 0.6 m wide x 0.4 m tall tabletop miniature theater with 5 cm puppets").
-   - MANDATORY INSTRUCTION: In EVERY clip's imagePrompt, endImagePrompt, and visualPrompt where that character or set appears, you MUST refer to them using the exact placeholders "{character1}" (or "{character2}") and "{background1}" (or "{background2}").
-   - NEVER vary, re-describe, or ad-lib character traits OR sizes between clips. Every visual prompt referencing the character/set MUST use the placeholders "{character1}" and "{background1}" so the description (including scale ratio) remains 100% token-for-token identical across all images and videos!
+3. MASTER SUBJECT & ENVIRONMENT CONSISTENCY (HUMAN VS. NON-HUMAN / STEM / DOCUMENTARY PARADIGMS):
+   - Narrative & Character-Driven Stories (Human / Creature / Fictional Drama):
+     * If the story centers around human characters or creatures, define them in "characters" with ABSOLUTE SIZE/BUILD (e.g. "character1": "1.8 m tall athletic adult male, detailed fixed appearance, age, gender, ethnicity, facial features, hair, eye color, and exact clothing from head to toe").
+     * Define the recurring location/set in "backgrounds" ({background1}) with absolute dimensions.
+     * Use {character1} and {background1} placeholders consistently.
+   - Non-Human, Documentary, Science, Geographic, Cosmic, or Engineering Stories:
+     * CRITICAL DISTINCTION: NEVER FORCE NON-HUMAN PHENOMENA INTO HUMANOID CHARACTER DOLLS!
+       Never define a map pin, crosshair, marker, route, atom, or planet as an "0.8 m tall character" in an empty void.
+     * In non-human genres, "characters" can define the primary focus subject/artifact (or be left empty "{}" if no recurring humanoid exists), and prompts must focus on TRUE genre dynamics:
+       a) Map / Geographic Narratives: Historical charts vs modern satellite overlays, GPS/sonar scans, boundary transformations, territorial evolution, labels & coordinates. Contrast historical documentation with modern satellite verification!
+       b) Astronomy / Cosmic Narratives: Gravitational lensing, accretion disks, relativistic jets, tidal disruption, orbital mechanics, deep cosmic scale.
+       c) Microbiology / Cellular Narratives: Nanoscale molecular machinery, receptor-ligand binding, viral injection, membrane lysis, crystal capsid assembly.
+       d) STEM / Physical Science Narratives: Field lines, phase transitions, stress concentration, superconduction, cascading reactions.
+     * Scale & Dimensions: In non-human genres, use real-world environmental scales (e.g. kilometers/miles across for oceans/continents, light-years for galaxies, nanometers for molecules).
 ${SCALE_AND_PROPORTION_GUIDELINES}
 4. RE-ORCHESTRATION & SYNTHESIS:
    - Seamlessly connect and expand the extracted source prompts across the clips into a compelling beginning, middle, and climax.
@@ -977,6 +986,10 @@ ${SCALE_AND_PROPORTION_GUIDELINES}
 5. STRICT ENGLISH LANGUAGE REQUIREMENT:
    - All generated clip fields — title, imagePrompt, endImagePrompt, visualPrompt, cameraMovement, subjectAction, environmentLighting, styleAesthetic, and narrationCues — MUST be written 100% strictly in clean ENGLISH.
    - NEVER output Chinese characters (汉字) in any field. The voiceover TTS engine requires pure English voiceover.
+
+6. CONCISE REASONING & OUTPUT:
+   - Keep thinking focused and brief. Do not engage in endless circular analysis.
+   - Your final answer MUST be the valid JSON structure specified below. Output the JSON object directly.
 
 Target Clip Duration: ${duration} seconds per clip.
 

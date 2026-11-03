@@ -146,6 +146,8 @@ export interface EvaluationSummary {
 export interface FastEvalSummary {
   enabled: boolean;
   gridImagePath: string;
+  /** Persisted cover file of the winning candidate (delivered on completion). */
+  winnerCoverPath?: string;
   winnerIndex: number;
   winnerVideoId: string;
   winnerTitle: string;
@@ -237,7 +239,6 @@ export interface FlowTutorPipelineResult {
   tutorial?: TutorialGenerationSummary;
   reportJsonPath: string;
   reportMarkdownPath: string;
-  reportHtmlPath: string;
   manifestPath?: string;
   logFilePath?: string;
   jsonlLogFilePath?: string;

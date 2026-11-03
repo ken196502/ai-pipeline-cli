@@ -42,7 +42,10 @@ export function resolveReferenceTarget(params: {
 }): { matchKey: string | null; matchSrc: string | null } {
   const matchKey =
     params.referenceKey && params.canvasKeys.has(params.referenceKey) ? params.referenceKey : null;
-  const matchSrc = !matchKey && params.referenceSrc ? params.referenceSrc : null;
+  const matchSrc =
+    !matchKey && params.referenceSrc && params.canvasKeys.has(params.referenceSrc)
+      ? params.referenceSrc
+      : null;
   return { matchKey, matchSrc };
 }
 

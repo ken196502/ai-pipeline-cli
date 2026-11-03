@@ -10,7 +10,6 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pc from 'picocolors';
-import { markdownToHtml } from '../../utils/markdown-to-html.js';
 import type { FlowTutorPipelineResult } from './contracts.js';
 
 /** Project root derived from this module's location (works for both src/ and dist/). */
@@ -401,32 +400,27 @@ export function generateFinalReportJson(result: FlowTutorPipelineResult): string
 }
 
 /**
- * Saves JSON, Markdown and self-contained HTML final report artifacts
- * to the target directory.
+ * Saves the JSON and Markdown final report artifacts to the target directory.
+ * (The self-contained HTML report was removed — completion delivery sends the
+ * winner cover + tutorial grid instead.)
  */
 export async function saveFinalReports(
   result: FlowTutorPipelineResult,
   outDir: string
-): Promise<{ jsonPath: string; markdownPath: string; htmlPath: string }> {
+): Promise<{ jsonPath: string; markdownPath: string }> {
   const resolvedDir = path.resolve(outDir);
   await fs.mkdir(resolvedDir, { recursive: true });
 
   const jsonPath = path.join(resolvedDir, 'final-report.json');
   const markdownPath = path.join(resolvedDir, 'FINAL_REPORT.md');
-  const htmlPath = path.join(resolvedDir, 'FINAL_REPORT.html');
 
   const markdownContent = generateFinalReportMarkdown(result);
   const jsonContent = generateFinalReportJson(result);
-  const htmlContent = markdownToHtml(markdownContent, {
-    title: `AI Viral Video Pipeline Report — ${result.runId}`,
-    baseDir: resolvedDir,
-  });
 
   await fs.writeFile(markdownPath, markdownContent, 'utf8');
   await fs.writeFile(jsonPath, jsonContent, 'utf8');
-  await fs.writeFile(htmlPath, htmlContent, 'utf8');
 
-  return { jsonPath, markdownPath, htmlPath };
+  return { jsonPath, markdownPath };
 }
 
 /**
@@ -437,9 +431,9 @@ export const generateExecutiveJsonReport = generateFinalReportJson;
 export async function saveExecutionReports(
   result: FlowTutorPipelineResult,
   outDir: string
-): Promise<{ jsonPath: string; markdownPath: string; mdPath: string; htmlPath: string }> {
-  const { jsonPath, markdownPath, htmlPath } = await saveFinalReports(result, outDir);
-  return { jsonPath, markdownPath, mdPath: markdownPath, htmlPath };
+): Promise<{ jsonPath: string; markdownPath: string; mdPath: string }> {
+  const { jsonPath, markdownPath } = await saveFinalReports(result, outDir);
+  return { jsonPath, markdownPath, mdPath: markdownPath };
 }
 
 /**
@@ -498,6 +492,5 @@ export function printExecutiveSummary(result: FlowTutorPipelineResult): void {
 
   console.log(pc.bold(pc.magenta('Reports Generated:')));
   console.log(` ${pc.dim('•')} Markdown Report: ${pc.bold(result.reportMarkdownPath)}`);
-  console.log(` ${pc.dim('•')} HTML Report:     ${pc.bold(result.reportHtmlPath)}`);
   console.log(` ${pc.dim('•')} JSON Summary:    ${pc.bold(result.reportJsonPath)}\n`);
 }

@@ -15,19 +15,21 @@ export function generateRunId(prefix: string): string {
 /**
  * Resolves the output directory for a run.
  * If `outDir` is provided, uses it directly (resolved to absolute).
- * Otherwise defaults to `{cwd}/artifacts/{runId}/`.
+ * Otherwise defaults to `{cwd}/artifacts/{group}/{runId}/`, or
+ * `{cwd}/artifacts/{runId}/` when no group is given.
  */
-export function resolveOutputDir(outDir: string | undefined, runId: string): string {
-  return outDir
-    ? path.resolve(outDir)
+export function resolveOutputDir(outDir: string | undefined, runId: string, group?: string): string {
+  if (outDir) return path.resolve(outDir);
+  return group
+    ? path.resolve(process.cwd(), 'artifacts', group, runId)
     : path.resolve(process.cwd(), 'artifacts', runId);
 }
 
 /**
  * Creates the output directory and returns the resolved path.
  */
-export async function ensureOutputDir(outDir: string | undefined, runId: string): Promise<string> {
-  const resolved = resolveOutputDir(outDir, runId);
+export async function ensureOutputDir(outDir: string | undefined, runId: string, group?: string): Promise<string> {
+  const resolved = resolveOutputDir(outDir, runId, group);
   await fs.mkdir(resolved, { recursive: true });
   return resolved;
 }

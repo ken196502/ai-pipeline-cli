@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import sharp from 'sharp';
 import { searchYouTubeInBrowser } from './browser-search.js';
 import { buildNxNCandidateGrid } from './grid.js';
 import { evaluateCandidatesWithVL } from './evaluator.js';
@@ -72,6 +73,13 @@ export async function runFastEval(options: FastEvalOptions): Promise<FastEvalRes
     onProgress,
   });
 
+  // Persist the winning cover as a real file: downstream pipelines deliver it
+  // (e.g. Telegram) instead of attaching a whole HTML report.
+  const winnerCoverPath = path.join(path.resolve(outDir), 'winner-cover.jpg');
+  await sharp(result.winner.thumbnailBuffer)
+    .jpeg({ quality: 92 })
+    .toFile(winnerCoverPath);
+
   // Save fasteval summary report
   const summaryPath = path.join(path.resolve(outDir), 'fasteval-result.json');
   await fs.writeFile(
@@ -95,6 +103,7 @@ export async function runFastEval(options: FastEvalOptions): Promise<FastEvalRes
           viewsPerDay: c.viewsPerDay,
         })),
         gridImagePath: result.gridImagePath,
+        winnerCoverPath,
         evaluatedAt: result.evaluatedAt,
       },
       null,
@@ -102,7 +111,7 @@ export async function runFastEval(options: FastEvalOptions): Promise<FastEvalRes
     )
   );
 
-  return result;
+  return { ...result, winnerCoverPath };
 }
 
 /**

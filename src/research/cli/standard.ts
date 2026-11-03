@@ -245,10 +245,10 @@ program
   .option('-l, --language <string>', 'Evaluation language', 'en')
   .option('-m, --model <string>', 'LLM model identifier for standard distillation')
   .option('-o, --output <path>', 'Output destination path for evaluation-standard.json (relative to artifact dir)')
-  .option('--artifacts-dir <path>', 'Output directory for run artifacts (default: artifacts/standard-<runId>/)')
+  .option('--artifacts-dir <path>', 'Output directory for run artifacts (default: artifacts/research/<runId>/)')
   .action(async (opts) => {
     const runId = generateRunId('standard');
-    const outDir = await ensureOutputDir(opts.artifactsDir, runId);
+    const outDir = await ensureOutputDir(opts.artifactsDir, runId, 'research');
 
     const logger = createRunLogger({
       runId,
@@ -344,10 +344,10 @@ program
   .requiredOption('-s, --standard <path>', 'Path to evaluation-standard.json file')
   .option('--strict', 'Fail with non-zero exit code if schema issues are detected', false)
   .option('--json', 'Output verification result as JSON', false)
-  .option('--artifacts-dir <path>', 'Output directory for run artifacts (default: artifacts/verify-<runId>/)')
+  .option('--artifacts-dir <path>', 'Output directory for run artifacts (default: artifacts/research/<runId>/)')
   .action(async (opts) => {
     const runId = generateRunId('verify');
-    const outDir = await ensureOutputDir(opts.artifactsDir, runId);
+    const outDir = await ensureOutputDir(opts.artifactsDir, runId, 'research');
 
     const logger = createRunLogger({
       runId,

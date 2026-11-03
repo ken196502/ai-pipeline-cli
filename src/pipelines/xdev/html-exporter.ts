@@ -41,14 +41,15 @@ export async function convertMarkdownToStandaloneHtml(
 
   // 2. Parse Markdown to HTML
   const bodyHtml = await marked.parse(processedMarkdown);
+  const docTitle = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim() || 'Technical Architecture & Engineering Insights';
 
   // 3. Mobile-first responsive HTML layout
   return `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, minimum-scale=1.0">
-  <title>Multi-Agent 架构演进与落地真谛</title>
+  <title>${docTitle}</title>
   <style>
     :root {
       --bg-color: #F8FAFC;

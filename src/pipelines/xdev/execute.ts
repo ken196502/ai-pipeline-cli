@@ -212,14 +212,19 @@ ${grokEnrichmentText}
 
     console.log(pc.cyan('[Stage 5/7] Generating real header image via env IMAGE_MODEL and architectural SVGs...'));
     const headerImagePath = path.join(outDir, `header-image-${timestamp}.png`);
+    const primaryTopicEn =
+      evalResult.selectedTopics[0].topicTitleEn ||
+      evalResult.selectedTopics[0].tweet.text.slice(0, 80).replace(/https?:\/\/\S+/g, '').trim() ||
+      'Distributed Agent State & Context Architecture';
+    // Strictly English prompt with no text overlay to avoid rendered typographical garbage or Chinese characters
     await generateImageFromEnv({
-      prompt: `Sophisticated minimalist technology illustration in Google Material 3 and Apple clean industrial design aesthetic, crisp off-white background (#F8FAFC), elegant translucent frosted glass layers, precision pastel geometric volumes, subtle ambient shadows, Apple System Blue and vibrant modern accents, high-end editorial tech publication quality, 8k resolution: ${primaryTopic}`,
+      prompt: `Sophisticated minimalist abstract technology 3D illustration in Google Material 3 and Apple clean industrial design aesthetic, crisp off-white background (#F8FAFC), elegant translucent frosted glass layers, precision pastel geometric volumes, subtle ambient shadows, Apple System Blue and vibrant modern accents, high-end editorial tech publication quality, 8k resolution, completely clean with NO text, NO typography, NO watermark, NO letters: ${primaryTopicEn}`,
       outputPath: headerImagePath,
       size: '1024x1024',
     });
 
-    const svgArchitecture = await generateSvgArchitectureDiagram(primaryTopic);
-    const svgSequence = await generateSvgSequenceDiagram(primaryTopic);
+    const svgArchitecture = await generateSvgArchitectureDiagram(primaryTopicEn);
+    const svgSequence = await generateSvgSequenceDiagram(primaryTopicEn);
 
     stages.push({
       stage: 'asset-generation',

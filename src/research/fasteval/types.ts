@@ -39,6 +39,8 @@ export interface FastEvalCandidate {
 export interface FastEvalResult {
   query: string;
   gridImagePath: string;
+  /** File holding the winning candidate's cover (persisted for delivery). */
+  winnerCoverPath?: string;
   gridBuffer: Buffer;
   candidates: FastEvalCandidate[];
   winnerIndex: number;
@@ -58,7 +60,8 @@ const FastEvalCandidateDataSchema = z.object({
   publishedTimeText: z.string().optional(), publishedDaysAgo: z.number().optional(), viewsPerDay: z.number().optional(),
 });
 export const FastEvalDataSchema = z.object({
-  query: z.string(), gridImagePath: z.string(), candidates: z.array(FastEvalCandidateDataSchema),
+  query: z.string(), gridImagePath: z.string(), winnerCoverPath: z.string().optional(),
+  candidates: z.array(FastEvalCandidateDataSchema),
   winnerIndex: z.number(), winner: FastEvalCandidateDataSchema, winnerCandidate: VideoCandidateSchema,
   style: z.string(), topCandidates: z.array(FastEvalTopCandidateSchema).min(1), reasoning: z.string(), evaluatedAt: z.string(),
 });
