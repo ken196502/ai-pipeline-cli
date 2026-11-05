@@ -2,6 +2,10 @@ import type { Browser } from 'webdriverio';
 import pc from 'picocolors';
 import type { ExtractedTweet } from './contracts.js';
 import type { FirefoxBiDiDriver } from './bidi-driver.js';
+import { normalizeSearchQuery } from '../../libs/text/index.js';
+
+// Re-exported for backward compatibility with existing callers/tests.
+export { normalizeSearchQuery };
 
 export interface KeywordScraperOptions {
   keywords: string[];
@@ -56,18 +60,8 @@ export function parseTweetViews(text?: string | null): number {
 }
 
 /**
- * Ensures the search query has an explicit language restriction.
- * Defaults to `lang:en` if no `lang:` modifier is already specified.
+ * Waits until the feed renders at least one tweet article.
  */
-export function normalizeSearchQuery(keyword: string): string {
-  const trimmed = keyword.trim();
-  if (!trimmed) return trimmed;
-  if (/\blang:\w+/i.test(trimmed)) {
-    return trimmed;
-  }
-  return `${trimmed} lang:en`;
-}
-
 async function waitForTweets(browser: Browser, timeoutMs = 8000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

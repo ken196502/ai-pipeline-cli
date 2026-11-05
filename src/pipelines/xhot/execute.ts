@@ -166,6 +166,7 @@ export async function executeXHotPipeline(
       query: options.query,
       candidateCount: options.candidateCount,
       maxAgeHours: options.maxCandidateAgeHours,
+      searchLang: options.searchLang,
       outDir,
       onProgress: (m) => notify('x-search-grid', m),
     });

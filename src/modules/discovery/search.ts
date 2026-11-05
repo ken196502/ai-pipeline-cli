@@ -7,6 +7,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ensureStandardBinaryPaths, resolveYtDlpBinary } from '../../libs/media/ytdlp.js';
 import { transcribeTweetVideo, checkPuterAsrReady } from '../../libs/asr/index.js';
+import { buildXSearchUrl, normalizeSearchQuery } from '../../libs/text/index.js';
 import type { XHotCandidate } from './contracts.js';
 
 const execFileAsync = promisify(execFile);
@@ -17,9 +18,17 @@ export interface SearchXOptions {
   candidateCount?: number;
   maxAgeHours?: number;
   outDir: string;
+  /**
+   * Language operator appended to the search query when the query itself does
+   * not specify `lang:xx`. Defaults to `en`; pass `null` to disable the filter
+   * (needed for non-English topics).
+   */
+  searchLang?: string | null;
   transcribeVideos?: boolean;
   onProgress?: (msg: string) => void;
 }
+
+export { buildXSearchUrl, normalizeSearchQuery };
 
 
 const TWEET_SELECTOR = 'article[data-testid="tweet"]';
@@ -323,7 +332,15 @@ export async function searchXCandidates(
   page: Page,
   options: SearchXOptions
 ): Promise<XHotCandidate[]> {
-  const { query, candidateCount = 12, maxAgeHours, outDir, onProgress } = options;
+  const {
+    query,
+    candidateCount = 12,
+    maxAgeHours,
+    outDir,
+    onProgress,
+    searchLang = 'en',
+  } = options;
+  const effectiveQuery = normalizeSearchQuery(query, { lang: searchLang });
   const shotsDir = path.join(outDir, 'candidate-shots');
   await fs.mkdir(shotsDir, { recursive: true });
 
@@ -335,9 +352,11 @@ export async function searchXCandidates(
   const candidates: XHotCandidate[] = [];
   const seenIds = new Set<string>();
 
+  report(`Effective search query: "${effectiveQuery}"`);
+
   const sweepFeed = async (rank: 'top' | 'live'): Promise<void> => {
     const feedLabel = rank === 'top' ? 'Top' : 'Latest';
-    const searchUrl = `https://x.com/search?q=${encodeURIComponent(query)}&f=${rank}`;
+    const searchUrl = buildXSearchUrl(query, rank, searchLang);
     report(`Navigating to ${feedLabel} feed: ${searchUrl}`);
     await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     await page.waitForTimeout(3000);

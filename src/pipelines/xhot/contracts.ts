@@ -32,6 +32,8 @@ export const XHotPipelineOptionsSchema = z.object({
   dryRun: z.boolean().default(false),
   twentyFourHour: z.union([z.boolean(), z.number().int().min(1)]).optional(),
   topics: z.union([z.string(), z.array(z.string())]).optional(),
+  /** Language operator appended to the X search query; `null` disables it. */
+  searchLang: z.string().nullable().default('en'),
 });
 export type XHotPipelineOptions = z.infer<typeof XHotPipelineOptionsSchema>;
 

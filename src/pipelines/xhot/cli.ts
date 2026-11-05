@@ -14,6 +14,7 @@ import {
 } from '../../utils/send_msg.js';
 import { formatDurationMs } from '../../utils/time.js';
 import { acquirePipelineLock, parseTopics, runPipeline24h } from '../core/index.js';
+import { parseSearchLangOption } from '../../libs/text/index.js';
 import type { XHotPipelineOptions, XHotFullResult } from './contracts.js';
 
 /**
@@ -21,6 +22,14 @@ import type { XHotPipelineOptions, XHotFullResult } from './contracts.js';
  * concurrent run would hijack the first one's browser session.
  */
 const PIPELINE_IDS = ['xhot', 'flowTutor'];
+
+/**
+ * Maps the `--search-lang` CLI value to the search language operator.
+ * `none` / `off` disables the filter entirely (needed for non-English topics).
+ */
+export function parseSearchLang(value?: string | null): string | null {
+  return parseSearchLangOption(value);
+}
 
 export function attachXHotOptions(cmd: Command): Command {
   return cmd
@@ -48,6 +57,7 @@ export function attachXHotOptions(cmd: Command): Command {
     .option('--tutorial-subtitles', 'Legacy alias for --explainer-subtitles')
     .option('--tts-voice <name>', 'edge-tts voice name for narration')
     .option('--tts-rate <rate>', 'edge-tts speech rate adjustment (e.g. +10%)', '+0%')
+    .option('--search-lang <code>', 'Language operator for X search (e.g. en, zh; "none" disables the filter)', 'en')
     .option('--dry-run', 'Run pipeline in dry-run mode without live network/generation calls', false);
 }
 
@@ -210,6 +220,7 @@ export async function handleXHotCommand(queryArg?: string, opts: any = {}): Prom
     explainerTransition: opts.explainerTransition,
     ttsVoice: opts.ttsVoice,
     ttsRate: opts.ttsRate || '+0%',
+    searchLang: parseSearchLang(opts.searchLang),
     dryRun: Boolean(opts.dryRun),
   };
 
