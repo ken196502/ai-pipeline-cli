@@ -297,12 +297,26 @@ function resolveWebhookConfigs(override?: Partial<WebhookConfig>): WebhookConfig
 }
 
 /** POSTs one message to one webhook target. Throws on any non-OK answer. */
+/**
+ * Per-call delivery options.
+ *
+ * `notifyPi` asks the gateway to also push the same text into the registered Pi
+ * agent session over its WebSocket (gateway `forwardInbound`). That is the ONLY
+ * Pi channel: the HTTP `POST /telegram/inbound` endpoints on 3094/3095 no
+ * longer exist (gateway 方案 C), so a second HTTP leg would just fail.
+ */
+export interface DeliveryOptions {
+  notifyPi?: boolean;
+}
+
 async function postWebhook(
   config: WebhookConfig,
   message: string,
-  attachment?: WebhookAttachment
+  attachment?: WebhookAttachment,
+  options?: DeliveryOptions
 ): Promise<WebhookSendResult> {
-  const body: Record<string, string> = { to: config.notifyTo, message, bot: config.bot };
+  const body: Record<string, string | boolean> = { to: config.notifyTo, message, bot: config.bot };
+  if (options?.notifyPi) body.notifyPi = true;
   if (attachment) {
     body.filePath = attachment.filePath.trim();
     if (attachment.fileName?.trim()) body.fileName = attachment.fileName.trim();
@@ -361,7 +375,8 @@ async function postWebhook(
 export async function sendMsg(
   message: string,
   overrideConfig?: Partial<WebhookConfig>,
-  attachment?: WebhookAttachment
+  attachment?: WebhookAttachment,
+  options?: DeliveryOptions
 ): Promise<WebhookSendResult> {
   const configs = resolveWebhookConfigs(overrideConfig);
 
@@ -382,7 +397,7 @@ export async function sendMsg(
   const failures: string[] = [];
   for (const config of configs) {
     try {
-      results.push(await postWebhook(config, message, attachment));
+      results.push(await postWebhook(config, message, attachment, options));
     } catch (err: any) {
       failures.push(`${config.bot}: ${err?.message || err}`);
     }
@@ -425,11 +440,13 @@ export type PiInboundOverride = Partial<PiInboundConfig> & {
 };
 
 /**
- * Resolves configuration for forwarding messages to the running Pi instance.
+ * Resolves configuration for the Pi session channel (bot, chat id, credentials).
  *
- * The endpoint is project-level (`NOTIFY_PROJECT_DEFAULTS`), overridable by
- * parameter. Only the token and chat id come from the environment: they are
- * credentials, not routing decisions.
+ * NOTE: this no longer describes an HTTP endpoint that the pipeline posts to.
+ * Pi delivery now happens through the gateway's WebSocket hub (`notifyPi`),
+ * which resolves the session from the bot name. The resolved bot/port pair is
+ * kept as a startup consistency check so a typo in `--notify` still fails at
+ * Stage 1 instead of silently dropping alerts.
  */
 export function getPiInboundConfig(override?: PiInboundOverride): PiInboundConfig {
   loadEnvFile();
@@ -555,58 +572,16 @@ export function verifyNotificationConfig(options?: {
 }
 
 /**
- * Sends a message directly into the running Pi agent session via Pi's inbound webhook.
- * This notifies Pi immediately of pipeline errors, events, or status updates.
- */
-export async function sendToPi(
-  message: string,
-  overrideConfig?: PiInboundOverride
-): Promise<boolean> {
-  if (isTestEnvironment() && !overrideConfig?.inboundUrl) {
-    console.log(pc.dim(`[sendToPi] Suppressed real Pi inbound message in test environment`));
-    return true;
-  }
-  const config = getPiInboundConfig(overrideConfig);
-
-  const payload = {
-    body: message,
-    senderId: config.senderId,
-    chatId: config.chatId,
-    timestamp: Math.floor(Date.now() / 1000),
-  };
-
-  const res = await fetch(config.inboundUrl, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.inboundToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(5000),
-  });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(
-      `[sendToPi] Pi inbound rejected the message HTTP ${res.status} (${config.inboundUrl}): ${text || res.statusText}`
-    );
-  }
-
-  return true;
-}
-
-/**
- * Dispatches an error alert to both Telegram (via Webhook) and Pi (via Inbound listener).
+ * Dispatches an error alert to the gateway once, asking it to fan out to BOTH
+ * channels: the Telegram chat and the registered Pi agent session (`notifyPi`).
  *
  * Delivery targets: `--notify-error` → `--notify` → project default.
- * the standard channel. Multiple targets are fanned out; a caller-supplied
- * override still wins over all of them.
+ * Multiple targets are fanned out; a caller-supplied override still wins over all of them.
  */
 export async function notifyError(
   message: string,
   options?: {
     webhookOverride?: Partial<WebhookConfig>;
-    piOverride?: PiInboundOverride;
     attachment?: WebhookAttachment;
   }
 ): Promise<void> {
@@ -614,27 +589,23 @@ export async function notifyError(
   const targets = errorChannel.targets ?? [];
 
   const deliver = async (target?: NotifyTarget): Promise<void> => {
-    // A per-target bot also pins the matching Pi inbound endpoint, so the two
-    // legs of one alert can never disagree.
+    // A per-target bot pins the gateway bot, and the gateway resolves that bot's
+    // Pi WebSocket session itself — the two channels cannot disagree on routing.
     const webhookOverride = {
       ...(target ? { bot: target.bot } : errorChannel.webhookOverride),
       ...options?.webhookOverride,
     };
-    const piOverride = {
-      ...(target ? { inboundUrl: target.inboundUrl, bot: target.bot } : errorChannel.piOverride),
-      ...options?.piOverride,
-    };
+    const bot = webhookOverride.bot ?? NOTIFY_PROJECT_DEFAULTS.bot;
 
-    await Promise.allSettled([
-      // 1. Telegram Webhook
-      sendMsg(message, webhookOverride, options?.attachment).catch((e) => {
-        console.error(pc.yellow(`[webhook] Warning: Failed to send Telegram notification: ${e.message}`));
-      }),
-      // 2. Pi Inbound Listener
-      sendToPi(message, piOverride).catch((e) => {
-        console.error(pc.dim(`[sendToPi] Warning: Failed to send to Pi: ${e.message}`));
-      }),
-    ]);
+    // One request, two channels: gateway → Telegram + gateway → Pi (WS).
+    // A failure here is a real failure and must stay visible to the caller.
+    await sendMsg(message, webhookOverride, options?.attachment, { notifyPi: true })
+      .then(() => {
+        console.log(pc.dim(`[pi-inbound] forwarded via gateway (bot=${bot}, notifyPi=true)`));
+      })
+      .catch((e) => {
+        console.error(pc.yellow(`[webhook] Failed to send alert (Telegram + Pi) bot=${bot}: ${e.message}`));
+      });
   };
 
   if (targets.length <= 1) {

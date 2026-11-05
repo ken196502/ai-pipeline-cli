@@ -3,10 +3,13 @@ import path from 'node:path';
 import pc from 'picocolors';
 import { chat } from '../../libs/llm/client.js';
 import { extractJsonObject } from '../../libs/llm/json.js';
-import { getEnvConfig } from '../../utils/env.js';
 import {
-  ExplainerStoryboardSchema,
   ExplainerTimelineSchema,
+  ExplainerStoryboardSchema,
+  buildExplainerStoryboardSchema,
+  collectStoryboardEffectFields,
+  migrateLegacyStoryboard,
+  storyboardForDisk,
   type ExplainerVideoSummary,
   type ExplainerStoryboard,
   type ExplainerTimeline,
@@ -17,6 +20,15 @@ import { writeExplainerPlayer } from '../../libs/player/player.js';
 import { renderExplainerVideo } from '../../libs/player/render.js';
 import { writeHostRenderScript } from '../../libs/player/host-script.js';
 import { buildOpusVoiceTrack, type OpusVoiceTrackResult } from '../../libs/player/tts.js';
+import { collectPhraseExcerptErrors } from '../../libs/player/phrase.js';
+import {
+  ExplainerStyleSchema,
+  deepMergeStyle,
+  loadStyle,
+  readStylePatch,
+  type ExplainerStyle,
+  type ExplainerStylePatch,
+} from '../../libs/player/style.js';
 import type { ExplainerProduceOptions } from './contracts.js';
 
 export const EXPLAINER_DEFAULTS = {
@@ -30,12 +42,17 @@ export const EXPLAINER_DEFAULTS = {
   tutorialDirname: 'explainer',
   videoFilename: 'explainer-video.mp4',
   gridFilename: 'explainer-grid.jpg',
+  stylePreset: 'preset:ember-dark',
 };
 
 /**
  * Shared production tail for every explainer video pipeline:
- *   TTS voice track → timeline assembly → player bundle → host render script
- *   → headless frame render → (afterRender hook) → contact grid → summary.
+ *   style resolution → TTS voice track → timeline assembly → player bundle
+ *   → host render script → headless frame render → (afterRender hook)
+ *   → contact grid → summary.
+ *
+ * Content (storyboard) and effects (style) are loaded independently and both
+ * written into the run directory next to voice.json.
  */
 export async function produceExplainerVideo(
   options: ExplainerProduceOptions
@@ -63,7 +80,8 @@ export async function produceExplainerVideo(
   const narrationLanguage = options.narrationLanguage ?? 'en';
   const voice = options.ttsVoice || 'Ryan';
   const rate = options.ttsRate ?? '+0%';
-  const explainerDirname = options.explainerDirname ?? options.tutorialDirname ?? EXPLAINER_DEFAULTS.explainerDirname;
+  const explainerDirname =
+    options.explainerDirname ?? options.tutorialDirname ?? EXPLAINER_DEFAULTS.explainerDirname;
 
   const progress = (stage: string, message: string) => {
     if (onProgress) {
@@ -78,6 +96,33 @@ export async function produceExplainerVideo(
   await fs.mkdir(explainerDir, { recursive: true });
   await fs.mkdir(assetsOutDir, { recursive: true });
 
+  // 0. Style resolution: built-in defaults < pipeline preset < run style.json
+  //    < explicit CLI/style option. Never silently falls back on a bad file.
+  const stylePatches: ExplainerStylePatch[] = [];
+  if (options.storyboardStylePatch) stylePatches.push(options.storyboardStylePatch);
+  if (options.style) stylePatches.push(await readStylePatch(options.style, outDir));
+  if (options.transition) {
+    stylePatches.push({
+      transitions: {
+        clip: {
+          mode: 'fixed',
+          pool: [options.transition],
+        },
+      },
+    });
+  }
+  let style: ExplainerStyle = await loadStyle({
+    input: options.stylePreset ?? EXPLAINER_DEFAULTS.stylePreset,
+    patches: stylePatches,
+  });
+  if (subtitles) {
+    style = ExplainerStyleSchema.parse(
+      deepMergeStyle(style, { components: { subtitleBanner: { enabled: true } } })
+    );
+  }
+  await fs.writeFile(path.join(explainerDir, 'style.json'), JSON.stringify(style, null, 2) + '\n', 'utf-8');
+  progress('style', `Style ready (${path.join(explainerDirname, 'style.json')})`);
+
   // Guarantee that all material assets exist inside explainerDir/assets
   for (const asset of assets) {
     if (asset.sourcePath && asset.src) {
@@ -88,36 +133,38 @@ export async function produceExplainerVideo(
         if (!destExists && srcExists) {
           await fs.mkdir(path.dirname(destPath), { recursive: true });
           await fs.copyFile(asset.sourcePath, destPath);
+        } else if (!srcExists && !destExists) {
+          throw new Error(`source file is missing: ${asset.sourcePath}`);
         }
-      } catch {
-        // ignore copy errors for optional assets
+      } catch (err: any) {
+        throw new Error(`failed to package asset "${asset.id}": ${err?.message || err}`);
       }
     }
   }
 
-  if (options.storyboardFilename) {
-    await fs.writeFile(
-      path.join(outDir, options.storyboardFilename),
-      JSON.stringify(storyboard, null, 2) + '\n',
-      'utf-8'
-    );
-  }
+  // The storyboard written to disk is CONTENT ONLY (no effect fields).
+  const storyboardPath = options.storyboardFilename
+    ? path.join(outDir, options.storyboardFilename)
+    : path.join(explainerDir, 'storyboard.json');
+  await fs.writeFile(storyboardPath, JSON.stringify(storyboardForDisk(storyboard), null, 2) + '\n', 'utf-8');
 
-  // 1. Voice track synthesis (edge/local TTS with OpusVideo chapter padding)
+  // 1. Voice track synthesis (timing derives entirely from style.timing)
   progress('tts', `Synthesizing spoken narration (${voice}, rate ${rate})...`);
   const voiceTrack: OpusVoiceTrackResult = await buildOpusVoiceTrack({
     clips: storyboard.clips,
     outAudioDir: assetsOutDir,
+    style,
     assets,
     voice,
     rate,
     instruct: options.ttsInstruct,
+    concurrency: options.ttsConcurrency,
     onProgress: (m) => progress('tts', m),
   });
   const totalDurationSec = voiceTrack.totalDurationSec;
 
-  // 2. Timeline assembly
-  progress('player', 'Building OpusVideo player timeline...');
+  // 2. Timeline assembly (content only; voice timing lives in voice.json)
+  progress('player', 'Building explainer player timeline...');
   const timeline: ExplainerTimeline = ExplainerTimelineSchema.parse({
     version: '2.0.0',
     runId,
@@ -130,11 +177,9 @@ export async function produceExplainerVideo(
     totalDurationSec,
     audioSrc: 'assets/narration.mp3',
     meta: {
-      ...(storyboard.meta || {
-        title,
-        subtitle: topic,
-        design: { w: width, h: height },
-      }),
+      title: storyboard.meta?.title || title,
+      subtitle: storyboard.meta?.subtitle || topic,
+      design: { w: width, h: height },
       subtitles,
     },
     assets,
@@ -163,6 +208,7 @@ export async function produceExplainerVideo(
     timeline,
     icons: resolveLucideIcons(usedIconNames),
     outDir: explainerDir,
+    style,
   });
   progress('player', `Player bundle ready: ${path.basename(playerFiles.htmlPath)}`);
 
@@ -185,6 +231,7 @@ export async function produceExplainerVideo(
       outVideoPath: videoPath,
       engine,
       browserPath: engine === 'chromium' ? options.browserPath : undefined,
+      profileDir: options.profileDir,
       concurrency: options.concurrency,
       crf,
       preset,
@@ -275,9 +322,7 @@ export async function produceExplainerVideo(
     rate,
     narrationLanguage,
     assetsCount: assets.length,
-    storyboardPath: options.storyboardFilename
-      ? path.join(outDir, options.storyboardFilename)
-      : path.join(explainerDir, 'storyboard.json'),
+    storyboardPath,
     gridPath,
     timelinePath: playerFiles.timelinePath,
     playerPath: playerFiles.htmlPath,
@@ -303,6 +348,46 @@ export async function produceExplainerVideo(
   return summary;
 }
 
+/**
+ * Loads a storyboard JSON from disk, migrating legacy effect fields out into a
+ * style patch. Used to re-render artifacts produced before content/effect
+ * separation (e.g. `_archive/xhot/*\/10-explainer-storyboard.json`).
+ */
+export async function loadStoryboardWithMigration(filePath: string): Promise<{
+  storyboard: ExplainerStoryboard;
+  stylePatch: ExplainerStylePatch;
+  migratedFields: string[];
+}> {
+  const raw = JSON.parse(await fs.readFile(filePath, 'utf-8'));
+  const migrated = migrateLegacyStoryboard(raw);
+  if (migrated.migratedFields.length > 0) {
+    console.warn(
+      pc.yellow(
+        `[explainer] Migrated ${migrated.migratedFields.length} legacy effect field(s) out of ${path.basename(
+          filePath
+        )} into style.json: ${migrated.migratedFields.join(', ')}`
+      )
+    );
+  }
+  return {
+    storyboard: migrated.storyboard,
+    stylePatch: migrated.stylePatch as ExplainerStylePatch,
+    migratedFields: migrated.migratedFields,
+  };
+}
+
+/** Raised when element phrases are not verbatim excerpts of their narration. */
+class PhraseExcerptError extends Error {}
+
+function assertPhraseExcerpts(storyboard: ExplainerStoryboard): void {
+  const errors = collectPhraseExcerptErrors(storyboard);
+  if (errors.length > 0) {
+    throw new PhraseExcerptError(
+      `every element phrase must be copied verbatim from its narration sentence: ${errors.join('; ')}`
+    );
+  }
+}
+
 export interface GenerateExplainerStoryboardParams {
   systemPrompt: string;
   userPrompt: string;
@@ -310,12 +395,21 @@ export interface GenerateExplainerStoryboardParams {
   contextTask?: string;
   fallbackTitle: string;
   fallbackTopic: string;
+  /**
+   * Material ids + lucide icon names bound into the schema. When provided the
+   * storyboard is validated strictly (unknown visual refs are rejected and fed
+   * back to the model) instead of silently degrading to an empty icon (B4).
+   */
+  assetIds?: ReadonlySet<string>;
+  iconNames?: ReadonlySet<string>;
 }
 
 /**
  * Shared helper that calls the LLM, extracts the JSON storyboard object,
- * validates against ExplainerStoryboardSchema, and repairs any syntax or
- * minor schema defects.
+ * validates it, and repairs syntax or minor schema defects.
+ *
+ * With `assetIds`/`iconNames` the strict material-bound schema is used and a
+ * validation failure is reported back to the model once for repair.
  */
 export async function generateExplainerStoryboard(
   params: GenerateExplainerStoryboardParams
@@ -324,14 +418,27 @@ export async function generateExplainerStoryboard(
   // The chat client already retries transport/5xx errors; here we retry only
   // when the returned payload itself is unusable, so a malformed completion
   // does not fail the whole video stage.
-  const MAX_ATTEMPTS = 2;
+  const MAX_ATTEMPTS = 3;
+  const strict =
+    params.assetIds && params.iconNames
+      ? buildExplainerStoryboardSchema({
+          assetIds: params.assetIds,
+          iconNames: params.iconNames,
+        })
+      : null;
+
   let lastError: Error | undefined;
+  let repairNote = '';
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const userPrompt = repairNote
+      ? `${params.userPrompt}\n\n【Previous attempt was rejected】\n${repairNote}\nReturn a corrected pure JSON storyboard.`
+      : params.userPrompt;
+
     const rawResponse = await chat({
       messages: [
         { role: 'system', content: params.systemPrompt },
-        { role: 'user', content: params.userPrompt },
+        { role: 'user', content: userPrompt },
       ],
       temperature: params.temperature ?? 0.3,
       context: { stage: 'explainer', task: params.contextTask ?? 'storyboard' },
@@ -344,9 +451,28 @@ export async function generateExplainerStoryboard(
       }
       const parsed = extraction.value as any;
 
+      const effectFields = collectStoryboardEffectFields(parsed);
+      if (effectFields.length > 0) {
+        throw new Error(
+          `storyboard must not contain effect fields (found: ${effectFields.join(', ')}) — colours, fonts, durations, cameras and transitions are configured in style.json`
+        );
+      }
+
+      if (strict) {
+        const result = strict.safeParse(parsed);
+        if (!result.success) {
+          throw new Error(result.error.issues.map((i) => i.message).join('; '));
+        }
+        assertPhraseExcerpts(result.data);
+        return result.data;
+      }
+
       try {
-        return ExplainerStoryboardSchema.parse(parsed);
+        const storyboard = ExplainerStoryboardSchema.parse(parsed);
+        assertPhraseExcerpts(storyboard);
+        return storyboard;
       } catch (err: any) {
+        if (err instanceof PhraseExcerptError) throw err;
         console.warn(pc.yellow(`[explainer] Storyboard validation issue, attempting repair: ${err.message}`));
         // Repair common defects: ensure meta, fallback title, wrap shots
         parsed.meta = parsed.meta || {};
@@ -362,10 +488,13 @@ export async function generateExplainerStoryboard(
           }
         }
 
-        return ExplainerStoryboardSchema.parse(parsed);
+        const repaired = ExplainerStoryboardSchema.parse(parsed);
+        assertPhraseExcerpts(repaired);
+        return repaired;
       }
     } catch (err: any) {
       lastError = err instanceof Error ? err : new Error(String(err));
+      repairNote = lastError.message;
       if (attempt < MAX_ATTEMPTS) {
         console.warn(
           pc.yellow(

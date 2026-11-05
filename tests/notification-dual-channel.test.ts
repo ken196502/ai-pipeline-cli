@@ -10,9 +10,9 @@ import { notifyError } from '../src/utils/send_msg.js';
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /**
- * The bot→port mapping is project-level configuration now. A test that mocks the
- * Pi inbound on an ephemeral port passes its own `map` to `notifyError()`; no
- * environment variable is involved.
+ * The bot→port mapping is project-level configuration now; the gateway resolves
+ * the Pi WebSocket session from the bot name. Nothing in these tests talks to an
+ * inbound HTTP port — that transport was removed with the gateway's 方案 C.
  */
 const MOCK_PI_BOT = 'main';
 
@@ -56,9 +56,10 @@ async function startMockServer(name: string): Promise<{
   };
 }
 
-test('notifyError delivers the same failure to Telegram and Pi inbound', async () => {
+test('notifyError sends ONE gateway request that fans out to Telegram and Pi', async () => {
   const telegram = await startMockServer('webhook');
-  const pi = await startMockServer('telegram/inbound');
+  // The old HTTP Pi-inbound transport: must stay silent, forever.
+  const legacyInbound = await startMockServer('telegram/inbound');
 
   try {
     await notifyError('❌ Viral pipeline failed: no prompts extracted', {
@@ -68,62 +69,60 @@ test('notifyError delivers the same failure to Telegram and Pi inbound', async (
         notifyTo: '5971350987',
         bot: MOCK_PI_BOT,
       },
-      piOverride: {
-        inboundUrl: pi.url,
-        inboundToken: 'pi-token',
-        senderId: '5971350987',
-        chatId: '5971350987',
-        bot: MOCK_PI_BOT,
-        map: { [MOCK_PI_BOT]: pi.port },
-      },
     });
 
-    // Telegram channel: gateway contract (to/message/bot + bearer token).
+    // Gateway contract: to/message/bot + bearer token + the Pi fan-out flag.
     assert.equal(telegram.requests.length, 1);
     assert.equal(telegram.requests[0].authorization, 'Bearer tg-token');
     assert.equal(telegram.requests[0].body.to, '5971350987');
     assert.equal(telegram.requests[0].body.bot, MOCK_PI_BOT);
+    assert.equal(telegram.requests[0].body.notifyPi, true);
     assert.match(telegram.requests[0].body.message, /Viral pipeline failed/);
 
-    // Pi channel: inbound contract (body/senderId/chatId + bearer token).
-    assert.equal(pi.requests.length, 1);
-    assert.equal(pi.requests[0].authorization, 'Bearer pi-token');
-    assert.equal(pi.requests[0].body.senderId, '5971350987');
-    assert.equal(pi.requests[0].body.chatId, '5971350987');
-    assert.match(pi.requests[0].body.body, /Viral pipeline failed/);
-    assert.equal(typeof pi.requests[0].body.timestamp, 'number');
+    // No second leg: the gateway owns the WebSocket hop to the Pi session.
+    assert.equal(
+      legacyInbound.requests.length,
+      0,
+      'the pipeline must not POST to the removed HTTP Pi-inbound endpoint'
+    );
   } finally {
     await telegram.close();
-    await pi.close();
+    await legacyInbound.close();
   }
 });
 
-test('notifyError still delivers to Telegram when the Pi inbound is unreachable', async () => {
-  const telegram = await startMockServer('webhook');
+test('notifyError reports a gateway failure instead of swallowing it', async () => {
+  const failing = http.createServer((_req, res) => {
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'gateway down' }));
+  });
+  await new Promise<void>((resolve) => failing.listen(0, '127.0.0.1', resolve));
+  const address = failing.address();
+  assert.ok(address && typeof address === 'object');
+
+  const logged: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: any[]) => {
+    logged.push(args.map((a) => String(a)).join(' '));
+  };
 
   try {
-    // Port 1 is never a Pi inbound listener.
     await notifyError('❌ partial failure: 1 clip failed', {
       webhookOverride: {
-        webhookUrl: telegram.url,
+        webhookUrl: `http://127.0.0.1:${address.port}/webhook`,
         webhookToken: 'tg-token',
         notifyTo: '5971350987',
         bot: MOCK_PI_BOT,
       },
-      piOverride: {
-        inboundUrl: 'http://127.0.0.1:1/telegram/inbound',
-        inboundToken: 'pi-token',
-        senderId: '5971350987',
-        chatId: '5971350987',
-        bot: MOCK_PI_BOT,
-        map: { [MOCK_PI_BOT]: 1 },
-      },
     });
 
-    assert.equal(telegram.requests.length, 1);
-    assert.match(telegram.requests[0].body.message, /partial failure/);
+    assert.ok(
+      logged.some((line) => /Failed to send alert \(Telegram \+ Pi\)/.test(line) && /HTTP 500/.test(line)),
+      `a gateway failure must be logged loudly, got: ${JSON.stringify(logged)}`
+    );
   } finally {
-    await telegram.close();
+    console.error = originalError;
+    await new Promise<void>((resolve) => failing.close(() => resolve()));
   }
 });
 

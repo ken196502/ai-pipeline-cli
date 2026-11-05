@@ -546,12 +546,16 @@ export async function runResearchPipeline(
         standardHash: standard.meta.standardHash,
         selectedVideoId: winnerVideo.videoId,
         reason: options.fastEvalResult.reasoning,
-        ranking: mappedEvaluations.map((ev) => ({
+        ranking: mappedEvaluations.map((ev, idx) => ({
           videoId: ev.videoId,
           compositeScore: ev.compositeScore,
           evidenceCoverage: 1.0,
           viewsPerDay: 1000,
           selectable: true,
+          // The VL shortlist is already rank-ordered: #1 is the primary pick,
+          // #2/#3 are the substitutes used when #1 yields nothing usable.
+          rank: idx + 1,
+          role: idx === 0 ? ('primary' as const) : ('alternate' as const),
         })),
         runnersUp: mappedEvaluations
           .filter((ev) => ev.videoId !== winnerVideo.videoId)
@@ -571,6 +575,22 @@ export async function runResearchPipeline(
       winnerVideoId: winnerVideo.videoId,
       reason: options.fastEvalResult.reasoning,
     });
+
+    // Ranked ladder: #1 primary + #2/#3 alternates. Printed up front so a later
+    // fallback is traceable to a decision made here, not improvised mid-run.
+    logger.info(
+      `[selection] Ranked candidates: ${selection.decision.ranking
+        .map((r) => `#${r.rank ?? '?'} ${r.role ?? 'candidate'} ${r.videoId} (${r.compositeScore})`)
+        .join(' → ')}`,
+      {
+        ranking: selection.decision.ranking.map((r) => ({
+          rank: r.rank,
+          role: r.role,
+          videoId: r.videoId,
+          compositeScore: r.compositeScore,
+        })),
+      }
+    );
 
     await run.write('evaluations', evaluations);
     await run.write('selection', selection.decision);
@@ -787,15 +807,36 @@ export async function runResearchPipeline(
     const refVideoDir = path.join(effectiveOutputDir, 'reference-video');
     await fs.mkdir(refVideoDir, { recursive: true });
 
-    // Candidates to process: initial winner first, followed by up to 2 runner-ups if prompt extraction yields 0 prompts
-    const runnerUpCandidates: VideoCandidate[] = (selection.decision.runnersUp || [])
-      .map((r) => poolResult.pool.find((p) => p.videoId === r.videoId))
-      .filter((v): v is VideoCandidate => Boolean(v && v.videoId !== winnerVideo.videoId));
+    // Candidates to process: the ranked ladder (#1 primary, then #2/#3 alternates).
+    //
+    // The queue is built from `selection.decision.ranking` and resolved against ALL
+    // research candidates, not just the 5-item evaluation pool: a ranked runner-up
+    // that fell outside the pool used to be silently dropped here, which left the
+    // prompt detector with a single substitute (2026-11-03 run: BKuP8yHsd1o vanished).
+    const MAX_PROMPT_CANDIDATES = 3;
+    const rankedVideoIds = [
+      winnerVideo.videoId,
+      ...selection.decision.ranking.map((r) => r.videoId),
+      ...(selection.decision.runnersUp ?? []).map((r) => r.videoId),
+    ].filter((id, idx, arr) => arr.indexOf(id) === idx);
+
+    const alternateCandidates: VideoCandidate[] = rankedVideoIds
+      .filter((id) => id !== winnerVideo.videoId)
+      .slice(0, MAX_PROMPT_CANDIDATES - 1)
+      .map((id) => candidateByVideoId.get(id) ?? poolResult.pool.find((p) => p.videoId === id))
+      .filter((v): v is VideoCandidate => Boolean(v && v.videoId));
 
     const candidateQueue = [
       { video: winnerVideo, isRetry: false, retryIndex: 0 },
-      ...runnerUpCandidates.slice(0, 2).map((v, i) => ({ video: v, isRetry: true, retryIndex: i + 1 })),
+      ...alternateCandidates.map((v, i) => ({ video: v, isRetry: true, retryIndex: i + 1 })),
     ];
+
+    logger.info(
+      `[selection] Prompt-detection queue: ${candidateQueue
+        .map((q) => `${q.isRetry ? `#${q.retryIndex + 1} alternate` : '#1 primary'} ${q.video.videoId}`)
+        .join(' → ')}`,
+      { queue: candidateQueue.map((q) => ({ videoId: q.video.videoId, retryIndex: q.retryIndex })) }
+    );
 
     let frameEvidence: FrameEvidence | undefined;
     let framesResult: FramesResult | undefined;
@@ -820,9 +861,9 @@ export async function runResearchPipeline(
       if (item.isRetry) {
         report(
           'prompt-detector',
-          `Previous candidate yielded 0 AI video prompts. Retrying candidate ${item.retryIndex}/2: "${curVideo.title}" by ${curVideo.channelTitle} (${curVideo.videoId})`
+          `Previous candidate yielded 0 AI video prompts. Trying alternate candidate #${item.retryIndex + 1}/${candidateQueue.length}: "${curVideo.title}" by ${curVideo.channelTitle} (${curVideo.videoId})`
         );
-        logger.info(`Retrying prompt extraction with runner-up candidate ${item.retryIndex}/2`, {
+        logger.info(`Retrying prompt extraction with alternate candidate #${item.retryIndex + 1}/${candidateQueue.length}`, {
           videoId: curVideo.videoId,
           title: curVideo.title,
         });
@@ -964,10 +1005,14 @@ export async function runResearchPipeline(
       // plan-fix-sabr-pot-download.md.
       if (!curVideoPath) {
         report('media-download', `Stage 8a/10: Downloading "${curVideo.title}" by ${curVideo.channelTitle} (${curVideo.videoId})`);
+        // If transcript cues are already available, audio is not needed for ASR;
+        // fetch pure high-res video (>=720p) to maximize prompt OCR clarity.
+        const hasTranscript = Boolean(winnerTranscript && winnerTranscript.cues && winnerTranscript.cues.length > 0);
         const downloadWithActiveCookies = async () =>
           downloadVideo({
             videoId: curVideo.videoId,
             outputDir: refVideoDir,
+            videoOnly: hasTranscript,
             cookiePath: activeCookiePath ?? cookiePath ?? undefined,
             proxyUrl: proxyUrl ?? undefined,
             expectedDurationSec: curVideo.metrics.durationSec,
@@ -1137,7 +1182,9 @@ export async function runResearchPipeline(
       }
 
       if (cIdx < candidateQueue.length - 1) {
-        logger.warn(`Candidate ${curVideo.videoId} ("${curVideo.title}") yielded 0 AI prompts. Retrying with next runner-up candidate.`);
+        logger.warn(
+          `Candidate ${curVideo.videoId} ("${curVideo.title}") yielded 0 AI prompts. Trying the next ranked alternate (${cIdx + 2}/${candidateQueue.length}).`
+        );
       }
     }
 

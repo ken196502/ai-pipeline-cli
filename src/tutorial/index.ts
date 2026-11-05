@@ -19,12 +19,16 @@ import { collectTutorialAssets, type TutorialClipOutputRef } from './assets.js';
 import { collectBrowserStepShots } from './step-shots.js';
 import { captureGeminiShots } from './ui-shots.js';
 import { listLucideIconNames, resolveLucideIcons } from './icons.js';
-import { writeTutorialPlayer } from './player.js';
-import { renderTutorialVideo, type TutorialRenderEngine } from './render.js';
-import { runTutorialVisualQa } from './qa.js';
+import { writeExplainerPlayer } from '../libs/player/player.js';
+import { loadStyle, readStylePatch, type ExplainerStyle, type ExplainerStylePatch } from '../libs/player/style.js';
+import {
+  renderExplainerVideo,
+  type ExplainerRenderEngine,
+} from '../libs/player/render.js';
+import { runExplainerVisualQa } from '../libs/player/qa.js';
 import { generateTutorialStoryboard } from './storyboard.js';
 import { produceExplainerVideo } from '../modules/explainer-video/index.js';
-import { writeHostRenderScript } from './host-script.js';
+import { writeHostRenderScript } from '../libs/player/host-script.js';
 import { lookupChannelSpotlight, type ChannelSpotlightResult } from '../research/social/lookup.js';
 import {
   buildNarrationTrack,
@@ -35,18 +39,14 @@ import {
 import {
   TutorialStoryboardSchema,
   TutorialTimelineSchema,
-  buildSubtitleChunks,
-  clampSceneColumnWidths,
-  firstPhraseEnd,
-  lastPhraseStart,
   resolveChatbotPrompts,
   sceneDurationFromWords,
   type TutorialGenerationSummary,
-  type TutorialRenderScene,
   type TutorialStoryboard,
   type TutorialTimeline,
   type TutorialVoiceLine,
 } from './contracts.js';
+import { migrateLegacyStoryboard, storyboardForDisk } from '../libs/player/contracts.js';
 
 export interface TutorialLogger {
   info(message: string, meta?: unknown): void;
@@ -104,11 +104,23 @@ export interface CreateTutorialVideoParams {
   proxyUrl?: string | null;
   crf?: number;
   preset?: string;
+  /**
+   * Style (effects) document: a JSON file path, an inline style/patch object or
+   * `preset:<name>`. Content and effects are independent — the storyboard only
+   * carries text, this carries theme/timing/components/transitions/post.
+   */
+  style?: ExplainerStyle | ExplainerStylePatch | string;
+  /** Pipeline style preset override (defaults to the pipeline preset). */
+  stylePreset?: string;
+  /** Force one clip transition shader for the whole video. */
+  transition?: string;
+  /** Max concurrent TTS line requests (default 2). */
+  ttsConcurrency?: number;
   model?: string;
   llmConfig?: EnvConfig;
   profileDir?: string;
   /** Render engine override. Defaults to 'firefox'. */
-  engine?: TutorialRenderEngine;
+  engine?: ExplainerRenderEngine;
   browserPath?: string;
   logger?: TutorialLogger;
   onProgress?: (stage: string, message: string) => void;
@@ -325,10 +337,15 @@ export async function createTutorialVideo(
   });
   const storyboard = resolveChatbotPrompts(storyboardResult.storyboard, inventory.assets);
   const storyboardPath = path.join(params.outDir, TUTORIAL_STORYBOARD_FILENAME);
+  // Content-only on disk: effect fields (colours, fonts, durations, cameras) live
+  // in style.json and must never leak back into the storyboard artifact.
+  const storyboardArtifact = { ...storyboardForDisk(storyboard), model: storyboardResult.model };
   if (params.run) {
-    await params.run.write('storyboard', { ...storyboard, model: storyboardResult.model });
+    // Same object as the typed storyboard minus effect fields (kept out of the
+    // artifact on purpose) — the cast only bypasses the deprecated meta fields.
+    await params.run.write('storyboard', storyboardArtifact as unknown as typeof storyboard);
   } else {
-    await fs.writeFile(storyboardPath, JSON.stringify({ ...storyboard, model: storyboardResult.model }, null, 2) + '\n', 'utf-8');
+    await fs.writeFile(storyboardPath, JSON.stringify(storyboardArtifact, null, 2) + '\n', 'utf-8');
   }
   progress(
     'storyboard',
@@ -341,7 +358,7 @@ export async function createTutorialVideo(
   //    player bundle → host render script → frame render → visual QA →
   //    contact grid → summary. Domain-specific parts (materials, storyboard,
   //    QA policy, persistence) stay in this pipeline and plug in via hooks.
-  const engine = params.engine ?? 'firefox';
+  const engine = params.engine ?? 'chromium';
   let lastRenderLogged = 0;
   const summary = await produceExplainerVideo({
     outDir: params.outDir,
@@ -364,15 +381,20 @@ export async function createTutorialVideo(
     ttsVoice: voice,
     ttsRate: rate,
     browserPath: engine === 'chromium' ? params.browserPath : undefined,
+    profileDir: params.profileDir,
     crf: params.crf ?? DEFAULTS.crf,
     preset: params.preset ?? DEFAULTS.preset,
+    style: params.style,
+    stylePreset: params.stylePreset,
+    transition: params.transition,
+    ttsConcurrency: params.ttsConcurrency,
     previewOnly: params.previewOnly,
     summaryExtras: { model: storyboardResult.model, storyboardPath },
     afterRender: async ({ explainerDir }) => {
       // Self-check: programmatic visual QA (canvas pixel variance + JS boot)
       progress('qa', 'Running automated visual QA (canvas frame checks)');
       const targetDir = explainerDir || tutorialDir;
-      const qa = await runTutorialVisualQa({
+      const qa = await runExplainerVisualQa({
         tutorialDir: targetDir,
         engine,
         browserPath: engine === 'chromium' ? params.browserPath : undefined,
@@ -392,7 +414,11 @@ export async function createTutorialVideo(
       let finalShowcaseRange: { startSec: number; durationSec: number } | undefined;
       for (const c of voiceTrack.voiceData.clips) {
         for (const s of c.shots) {
-          if (s.lines.some((l) => l.icon === 'final-ai-video')) {
+          if (
+            s.lines.some(
+              (l) => l.icon === 'component:final-showcase' || l.icon === 'final-ai-video'
+            )
+          ) {
             finalShowcaseRange = {
               startSec: s.start,
               durationSec: s.dur,
@@ -428,113 +454,89 @@ export async function createTutorialVideo(
 
 
 /**
- * Merges standalone title pages (标题页) into their neighbouring content scenes
- * so a big title never fills an entire narration: the title card gets a brief
- * display window and the content columns carry the rest of the narration.
+ * Rebuilds the player bundle from an existing explainer bundle and re-renders
+ * the video — no LLM, TTS or asset collection involved. Used after player
+ * styling changes (`--rebuild`).
  *
- *   [title] [content] -> [merged: brief title intro, then content columns]
- *   [content] [title] -> [merged: content columns, then brief title outro]
- *
- * The title card windows (切入点) are derived from the edge-tts word
- * boundaries: the intro card lasts until the first phrase break of the title
- * narration, the outro card starts at the first word of its last phrase.
- * Word timings are rebased; total timeline length and the narration track stay
- * untouched (the merged scene is purely a visual re-cut). Idempotent.
+ * The bundle layout is: explainer.json (content + voice), style.json (effects),
+ * explainer-player.*. Bundles produced before the content/effect split carry
+ * their effect fields inside explainer.json; those are migrated into a fresh
+ * style.json on the first rebuild (and written to disk).
  */
-export function mergeTitleScenes(scenes: readonly TutorialRenderScene[]): TutorialRenderScene[] {
-  const isContent = (scene?: TutorialRenderScene) =>
-    Boolean(scene && scene.type !== 'title' && scene.columns && scene.columns.length > 0);
-  const isTitleOnly = (scene: TutorialRenderScene) =>
-    scene.type === 'title' && (!scene.columns || scene.columns.length === 0) && Boolean(scene.titleCard);
+/**
+ * Resolves the style document for a rebuild and writes it next to the player.
+ *
+ * Source priority: `style.json` in the bundle (current layout) → legacy effect
+ * fields migrated out of `explainer.json` (old layout) → explicit `--style` /
+ * `--style-preset` patch. A bundle with neither source and no `--style` fails
+ * loudly instead of rendering with guessed styling.
+ */
+export async function resolveRebuildStyle(params: {
+  tutorialDir: string;
+  rawTimeline: unknown;
+  style?: ExplainerStyle | ExplainerStylePatch | string;
+  stylePreset?: string;
+  transition?: string;
+  onProgress?: (stage: string, message: string) => void;
+}): Promise<ExplainerStyle> {
+  const styleFile = path.join(params.tutorialDir, 'style.json');
+  const styleExists = await fs.stat(styleFile).then(() => true).catch(() => false);
+  const stylePatches: ExplainerStylePatch[] = [];
 
-  const combine = (
-    first: TutorialRenderScene,
-    second: TutorialRenderScene,
-    phase: 'intro' | 'outro'
-  ): TutorialRenderScene => {
-    const title = phase === 'intro' ? first : second;
-    const content = phase === 'intro' ? second : first;
-    const startSec = Math.min(first.startSec, second.startSec);
-    const endSec = Math.max(first.endSec, second.endSec);
-    const durationSec = endSec - startSec;
-    const rebase = (scene: TutorialRenderScene) =>
-      (scene.words || []).map((word: any) => ({
-        word: word.word,
-        t0: word.t0 + (scene.startSec - startSec),
-        t1: word.t1 + (scene.startSec - startSec),
-      }));
-    const titleOffset = title.startSec - startSec;
-    const mergedWords = [...rebase(first), ...rebase(second)].sort((a, b) => a.t0 - b.t0);
-    // 切入点 derive from the edge-tts word boundaries of the merged narration
-    // (phrase gaps); they are recomputed at paint time from the same words.
-    const introUntil = firstPhraseEnd(mergedWords) ?? durationSec;
-    const outroFrom = lastPhraseStart(mergedWords) ?? 0;
-
-    return {
-      ...content,
-      title: content.title || title.title,
-      type: 'content',
-      narration:
-        phase === 'intro'
-          ? `${title.narration} ${content.narration}`
-          : `${content.narration} ${title.narration}`,
-      columns: content.columns,
-      titleCard: title.titleCard,
-      titlePhase: phase,
-      titleFromSec: phase === 'outro' ? Math.min(Math.max(0, outroFrom), durationSec) : 0,
-      titleUntilSec: phase === 'intro' ? Math.min(Math.max(introUntil, 1 / 60), durationSec) : durationSec,
-      words: mergedWords,
-      subtitleChunks: buildSubtitleChunks(mergedWords),
-      startSec,
-      endSec,
-      durationSec,
-      audioSrc: phase === 'intro' ? title.audioSrc : content.audioSrc,
-    };
-  };
-
-  const out: TutorialRenderScene[] = [];
-  for (let i = 0; i < scenes.length; i += 1) {
-    const scene = scenes[i];
-    if (!isTitleOnly(scene)) {
-      out.push(scene);
-      continue;
+  if (!styleExists) {
+    const migrated = migrateLegacyStoryboard(params.rawTimeline);
+    if (migrated.migratedFields.length === 0) {
+      throw new Error(
+        `cannot rebuild: neither ${styleFile} nor legacy effect fields in explainer.json were found — pass --style <path> or re-run the pipeline`
+      );
     }
-
-    const next = scenes[i + 1];
-    if (isContent(next) && !next.titleCard) {
-      out.push(combine(scene, next, 'intro'));
-      i += 1;
-      continue;
-    }
-
-    const prev = out[out.length - 1];
-    if (isContent(prev) && !prev.titleCard) {
-      out[out.length - 1] = combine(prev, scene, 'outro');
-      continue;
-    }
-
-    out.push(scene);
+    stylePatches.push(migrated.stylePatch as ExplainerStylePatch);
+    params.onProgress?.(
+      'rebuild',
+      `Migrated ${migrated.migratedFields.length} legacy effect field(s) into style.json (${migrated.migratedFields.join(', ')})`
+    );
+  }
+  if (params.style) stylePatches.push(await readStylePatch(params.style, params.tutorialDir));
+  if (params.transition) {
+    stylePatches.push({ transitions: { clip: { mode: 'fixed', pool: [params.transition] } } });
   }
 
-  return out.map((scene, index) => ({ ...scene, index }));
+  const style = await loadStyle({
+    input: params.stylePreset ?? (styleExists ? styleFile : undefined),
+    patches: stylePatches,
+  });
+  // Persist the resolved style so the next rebuild is a pure re-render.
+  await fs.writeFile(styleFile, JSON.stringify(style, null, 2) + '\n', 'utf-8');
+  return style;
 }
 
-/**
- * Rebuilds the player bundle from an existing tutorial/tutorial.json and
- * re-renders the video — no LLM, TTS or asset collection involved. Used after
- * player styling changes (`--rebuild`).
- */
 export async function rebuildTutorialBundle(params: {
   tutorialDir: string;
-  engine?: TutorialRenderEngine;
+  engine?: ExplainerRenderEngine;
   crf?: number;
   preset?: string;
   browserPath?: string;
+  profileDir?: string;
+  style?: ExplainerStyle | ExplainerStylePatch | string;
+  stylePreset?: string;
+  transition?: string;
   onProgress?: (stage: string, message: string) => void;
 }): Promise<{ videoPath: string; timeline: TutorialTimeline; framesRendered: number; gridPath: string; hostScriptPath: string }> {
-  const timelinePath = path.join(params.tutorialDir, 'tutorial.json');
-  const rawTimeline = JSON.parse(await fs.readFile(timelinePath, 'utf-8'));
+  const timelinePath = path.join(params.tutorialDir, 'explainer.json');
+  const rawTimeline = JSON.parse(await fs.readFile(timelinePath, 'utf-8').catch((err: any) => {
+    throw new Error(
+      `cannot rebuild: ${timelinePath} is missing (${err?.message || err}). Rebuild only supports bundles produced by the current pipeline (explainer.json + style.json).`
+    );
+  }));
   const timeline = TutorialTimelineSchema.parse(rawTimeline);
+  const style = await resolveRebuildStyle({
+    tutorialDir: params.tutorialDir,
+    rawTimeline,
+    style: params.style,
+    stylePreset: params.stylePreset,
+    transition: params.transition,
+    onProgress: params.onProgress,
+  });
 
   // Prompt materials are stored symbolically in tutorial.json (id-only
   // references). Merge the canonical full texts from prompts.json back in so
@@ -563,47 +565,30 @@ export async function rebuildTutorialBundle(params: {
         }
       }
     }
-  } else if (timeline.scenes) {
-    const timelineScenes = mergeTitleScenes(timeline.scenes).map((scene) => ({
-      ...scene,
-      columns: clampSceneColumnWidths(scene.columns),
-      subtitleChunks:
-        scene.subtitleChunks && scene.subtitleChunks.length > 0
-          ? scene.subtitleChunks
-          : buildSubtitleChunks(scene.words || []),
-    }));
-    timeline.scenes = timelineScenes;
-    for (const scene of timelineScenes) {
-      for (const column of scene.columns || []) {
-        if (column.role === 'visual' && column.visual.kind === 'icon') {
-          if (allIconNames.has(column.visual.assetId)) {
-            usedIconNames.add(column.visual.assetId);
-          }
-        }
-      }
-    }
   }
 
-  const playerFiles = await writeTutorialPlayer({
+  const playerFiles = await writeExplainerPlayer({
     timeline,
     icons: resolveLucideIcons(usedIconNames),
     outDir: params.tutorialDir,
+    style,
   });
-  params.onProgress?.('rebuild', `Player bundle rebuilt from tutorial.json (${path.basename(playerFiles.htmlPath)})`);
+  params.onProgress?.('rebuild', `Player bundle rebuilt from explainer.json (${path.basename(playerFiles.htmlPath)})`);
 
-  const hostScript = await writeHostRenderScript({ tutorialDir: params.tutorialDir });
+  const hostScript = await writeHostRenderScript({ explainerDir: params.tutorialDir });
   params.onProgress?.('rebuild', `Host render script refreshed (${path.basename(hostScript.scriptPath)})`);
 
   const narrationWavPath = path.join(params.tutorialDir, 'assets', 'narration.wav');
   const videoPath = path.join(params.tutorialDir, TUTORIAL_VIDEO_FILENAME);
-  const engine = params.engine ?? 'firefox';
-  const renderResult = await renderTutorialVideo({
+  const engine = params.engine ?? 'chromium';
+  const renderResult = await renderExplainerVideo({
     tutorialDir: params.tutorialDir,
     timeline,
     narrationWavPath,
     outVideoPath: videoPath,
     engine,
     browserPath: engine === 'chromium' ? params.browserPath : undefined,
+    profileDir: params.profileDir,
     crf: params.crf ?? DEFAULTS.crf,
     preset: params.preset ?? DEFAULTS.preset,
     onProgress: (rendered, total) => {
@@ -614,7 +599,7 @@ export async function rebuildTutorialBundle(params: {
   });
 
   params.onProgress?.('qa', 'Running automated visual QA (screenshots + layout checks)');
-  const qa = await runTutorialVisualQa({
+  const qa = await runExplainerVisualQa({
     tutorialDir: params.tutorialDir,
     engine,
     browserPath: engine === 'chromium' ? params.browserPath : undefined,

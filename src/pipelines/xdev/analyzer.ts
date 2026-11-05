@@ -5,9 +5,27 @@ import { chat } from '../../libs/llm/client.js';
 import { OperationalWarningError, type ExtractedTweet } from './contracts.js';
 import type { FirefoxBiDiDriver } from './bidi-driver.js';
 import { formatHistoryForPrompt, type XDevHistoryEntry } from './history.js';
-import { buildHeaderBannerSvg, buildArchitectureSvg, buildSequenceSvg } from './svg-builder.js';
+import {
+  buildHeaderBannerSvg,
+  buildArchitectureSvg,
+  buildSequenceSvg,
+  generateArchitectureSvgFromArticle,
+  generateSequenceSvgFromArticle,
+} from './svg-builder.js';
+import {
+  PRACTICE_COLLISION_POINTS,
+  getCollisionPoint,
+  selectCollisionPointId,
+  DEFAULT_COLLISION_POINT_ID,
+} from './practice-collision.js';
 
-export { buildHeaderBannerSvg, buildArchitectureSvg, buildSequenceSvg };
+export {
+  buildHeaderBannerSvg,
+  buildArchitectureSvg,
+  buildSequenceSvg,
+  generateArchitectureSvgFromArticle,
+  generateSequenceSvgFromArticle,
+};
 
 export interface SelectedTopicAnalysis {
   tweet: ExtractedTweet;
@@ -402,14 +420,150 @@ export async function fetchSelectedArticles(
 }
 
 /**
- * Stage 5: Deterministic SVG diagram wrappers
+ * Stage 5: Contextually generated SVG diagram wrappers.
+ * Now derived directly from the synthesized article body for 100% semantic grounding.
  */
-export async function generateSvgArchitectureDiagram(topicTitle: string): Promise<string> {
-  return buildArchitectureSvg(topicTitle);
+export async function generateSvgArchitectureDiagram(context: {
+  topicTitle: string;
+  articleTitle: string;
+  articleBody: string;
+  creativeSparks?: string;
+}): Promise<string> {
+  return generateArchitectureSvgFromArticle(context);
 }
 
-export async function generateSvgSequenceDiagram(topicTitle: string): Promise<string> {
-  return buildSequenceSvg(topicTitle);
+export async function generateSvgSequenceDiagram(context: {
+  topicTitle: string;
+  articleTitle: string;
+  articleBody: string;
+  creativeSparks?: string;
+}): Promise<string> {
+  return generateSequenceSvgFromArticle(context);
+}
+
+export interface CreativeSparkAnalysis {
+  hasMeaningfulFit: boolean;
+  /** Id of the single practice-collision point chosen for this article. */
+  selectedCollisionPointId: string;
+  fitPoints: string;
+  tweetRelevance: string;
+  conflictOrAlignment: string;
+  resolutionOrSynergy: string;
+  rawText: string;
+}
+
+/**
+ * Stage 3.5: Sparks & Practice Collision Pass (Pre-Grok)
+ * Because reasoning/thinking is turned off for throughput and convergence,
+ * this pass explicitly executes structured thinking by colliding the selected tweet
+ * with the author's real-world engineering practice (see `practice-collision.ts` POOL).
+ *
+ * IMPORTANT: the collision points are the operator's PERSONAL experience/recommendation,
+ * never a claim made by the source tweet. The LLM must select the SINGLE most relevant
+ * point for this tweet (not pile them all on) and clearly separate "what the tweet says"
+ * from "what I have learned in practice".
+ *
+ * If the topic is an independent or isolated area where genuine synergy is absent,
+ * the reviewer explicitly marks `hasMeaningfulFit: false`, allowing the pipeline to
+ * gracefully proceed based purely on the original tweet and materials without forced analogies.
+ *
+ * Four analytical dimensions:
+ * 1. 是否有契合点 (Alignment / Intersection Points)
+ * 2. 推文相关内容 (Direct Tweet & Material Relevance)
+ * 3. 跟所选实践是否冲突或合拍 (Tension or Harmony with Selected Practice Collision Point)
+ * 4. 如何解决冲突或结合提升 (Conflict Resolution, Architectural Synthesis & Synergy)
+ */
+export async function generateCreativeSparkInsights(options: {
+  topicTitle: string;
+  corePerspectiveZh: string;
+  tweetAuthor: string;
+  tweetUrl: string;
+  material: string;
+}): Promise<CreativeSparkAnalysis> {
+  const sparkPrompt = `你是一名顶级分布式与多智能体系统（Multi-Agent System）架构师。
+由于推理引擎未开启内部深思考，你需要显式执行结构化深度思考，评估并将以下选定的核心议题与推文素材，同「作者（我）的工程实践经验」进行碰撞。
+
+【重要框定】以下候选实践碰撞点全部是作者（我）在多个生产流水线里沉淀下来的个人工程经验与建议，**绝不是**源推文本身的主张。你在碰撞时必须明确区分"推文讲了什么"与"我的实践心得是什么"。
+
+【候选实践碰撞点池】请先通读全部候选点，再为本期推文/议题选取【唯一一个】最契合的碰撞点（输出其 id），并只针对该点做四维碰撞——不要堆砌全部。
+${PRACTICE_COLLISION_POINTS.map((p) => `• [${p.id}] ${p.titleZh}\n  ${p.experienceStatementZh}`).join('\n')}
+
+【待碰撞的选题与素材】
+议题: ${options.topicTitle}
+核心观点: ${options.corePerspectiveZh}
+信源推文: ${options.tweetAuthor} (${options.tweetUrl})
+
+素材内容:
+${options.material}
+
+【实事求是碰撞原则（严禁生搬硬套）】：
+- 如果本期推文主题与该实践确有深刻的底层机制交集（例如涉及多智能体协同、状态管理、注意力衰减、工具调度、回归测试、执行漂移等），请深入碰撞，提炼出真正的架构灵感。
+- **如果没有明显的契合点或强行联系显得牵强，请实事求是判定为“无显著契合点”，绝不要强行拉郎配或生搬硬套，流水线将完全遵循推文本身的事实与技术逻辑正常推进。**
+
+【输出格式规范】：
+第一行必须明确输出结论标识：
+\`契合度结论: [有契合点] 或 [无显著契合点]\`
+
+第二行必须明确输出你选定的碰撞点 id（取自上述点池，例如 git-cli-repo / existing-infra / shared-workspace-not-memory）：
+\`selectedCollisionPointId: <id>\`
+
+随后根据实际情况输出以下四个维度的剖析（若无显著契合点，简要说明推文本身关注的核心技术领域，并说明为何不宜强行牵扯）：
+## 1. 契合点分析 (Core Intersection Points)
+## 2. 推文核心技术映射 (Tweet Technical Substance)
+## 3. 实践冲突与合拍度辨析 (Tension & Harmony with Selected Practice Collision Point)
+## 4. 冲突解决与结合提升方案 (Architectural Synergy & Elevation)`;
+
+  try {
+    const res = await chat({
+      messages: [{ role: "user", content: sparkPrompt }],
+      context: { stage: "xdev", task: "creative-spark-pre-grok" },
+      timeoutMs: 120_000,
+      thinking: false,
+    });
+    const text = res.content.trim();
+
+    const hasMeaningfulFit =
+      !/契合度结论\s*:\s*\[?无显著契合点\]?/i.test(text) &&
+      !/没有契合点|缺乏直接关联|无需强行结合|无需强行拉郎配/i.test(text.slice(0, 200));
+
+    const extractSection = (headingRegex: RegExp, nextHeadingRegex: RegExp): string => {
+      const start = text.search(headingRegex);
+      if (start === -1) return "";
+      const slice = text.slice(start);
+      const next = slice.search(nextHeadingRegex);
+      return (next !== -1 ? slice.slice(0, next) : slice).replace(headingRegex, "").trim();
+    };
+
+    const fitPoints = extractSection(/##\s*1\..*?\n/i, /##\s*2\./i);
+    const tweetRelevance = extractSection(/##\s*2\..*?\n/i, /##\s*3\./i);
+    const conflictOrAlignment = extractSection(/##\s*3\..*?\n/i, /##\s*4\./i);
+    const resolutionOrSynergy = extractSection(/##\s*4\..*?\n/i, /$/);
+
+    const selectedCollisionPointId = hasMeaningfulFit
+      ? selectCollisionPointId(text, options.topicTitle)
+      : DEFAULT_COLLISION_POINT_ID;
+
+    return {
+      hasMeaningfulFit,
+      selectedCollisionPointId,
+      fitPoints: fitPoints || text.slice(0, 300),
+      tweetRelevance: tweetRelevance || "",
+      conflictOrAlignment: conflictOrAlignment || "",
+      resolutionOrSynergy: resolutionOrSynergy || "",
+      rawText: text,
+    };
+  } catch (err: any) {
+    console.warn(pc.yellow(`  ⚠ [spark] 灵感碰撞阶段调用异常 (${err?.message || err})，将完全按推文原始素材推进`));
+    return {
+      hasMeaningfulFit: false,
+      selectedCollisionPointId: DEFAULT_COLLISION_POINT_ID,
+      fitPoints: "",
+      tweetRelevance: "",
+      conflictOrAlignment: "",
+      resolutionOrSynergy: "",
+      rawText: "",
+    };
+  }
 }
 
 /**
@@ -424,9 +578,7 @@ export async function generateSvgSequenceDiagram(topicTitle: string): Promise<st
  */
 export async function synthesizeFocusedArticle(options: {
   evalResult: TweetEvaluationResult;
-  svgArchitecture: string;
-  svgSequence: string;
-  headerImagePath?: string;
+  creativeSparks?: CreativeSparkAnalysis;
   grokEnrichmentText?: string;
   history?: XDevHistoryEntry[];
 }): Promise<string> {
@@ -436,7 +588,45 @@ export async function synthesizeFocusedArticle(options: {
   const material = buildArticleMaterial(primary, options.grokEnrichmentText);
   const historyBlock = formatHistoryForPrompt(options.history || []);
 
-  const prompt = `You are a distinguished distributed systems architect and technical writer. Based strictly on the provided technical materials, write a deep, rigorous, logical, and beautifully crafted technical analysis essay.
+  const hasSparks = Boolean(options.creativeSparks?.hasMeaningfulFit && options.creativeSparks?.rawText);
+  const selectedPoint = getCollisionPoint(options.creativeSparks?.selectedCollisionPointId || DEFAULT_COLLISION_POINT_ID);
+  const creativeSparksBlock = hasSparks
+    ? `## Architectural Insights & Practice Collision (${selectedPoint?.titleEn ?? 'Engineering Practice'}):
+${options.creativeSparks!.rawText}
+`
+    : '';
+
+  const collisionInstruction = hasSparks
+    ? `   - **Crucial Creative Collision — Author's Personal Engineering Practice (Anchor & Pivot)**: ${selectedPoint ? selectedPoint.synthesisLensEn.replace('{{EXPERIENCE_EN}}', selectedPoint.experienceStatementEn) : ''}
+     * Contrast the tweet's mechanisms directly against this practice.
+     * Frame the entire engineering resolution through your hands-on experience (e.g., 'In my own production architectures, I found...').
+     * The entire second half of the essay must progressively build toward this practice collision as the definitive architectural solution.`
+    : `   - **Critical Engineering Critique — The Trap of LLM Omnipresence & Structured Sandbox Execution**:
+     * Approach the topic with sharp technical skepticism: critique the widespread industry anti-pattern of attempting to let an LLM dynamically orchestrate and arbitrate everything. When a single LLM model or unconstrained conversational loop attempts to handle brainstorming, multi-step planning, tool selection, and code execution simultaneously, it invariably collapses into state corruption, context bloat, hallucination spirals, and chaotic failure modes.
+     * Frame your authoritative personal engineering stance:
+       1. **Strict Context Isolation**: Decouple ideation/brainstorming/planning entirely from concrete execution.
+       2. **AI Workflow/Pipeline & Structured Context**: Concrete execution must be governed by an explicit **AI workflow/pipeline** feeding **strictly structured context** (typed schemas, isolated state contracts, explicit step inputs/outputs).
+       3. **Sandbox Execution**: Code and tool invocations must execute inside an **isolated sandbox environment** with zero leak of conversational noise or ephemeral intermediate prompt clutter.
+     * Articulate this from your personal stance as an architect: 'In my production architectures, I strictly reject letting an LLM orchestrate everything. I enforce context isolation between ideation and execution, driving implementation through deterministic AI pipelines and structured context within an isolated sandbox...'`;
+
+  const closingInstruction = hasSparks
+    ? `   - **STRICT REQUIREMENT — Converge and Close on the Practice Collision**: The final concluding section MUST anchor and finish exclusively on this practice collision point (${selectedPoint?.titleEn ?? 'Author\'s Practice'}).
+     * DO NOT diverge, introduce new speculative topics, or drift into generic platitudes.
+     * Explain why this specific engineering practice is the decisive architectural anchor that turns fragile prototypes into durable production systems.
+     * Deliver your authoritative verdict as an individual expert and state the concrete first step teams must take to adopt this exact pattern.`
+    : `   - **STRICT REQUIREMENT — Converge and Close on AI Pipeline, Structured Context & Sandbox Execution**:
+     * The final concluding section MUST definitively converge and finish on the architecture of **Strict Context Isolation + Deterministic AI Pipelines with Structured Context running in an Isolated Sandbox**.
+     * DO NOT diverge or drift into generic platitudes or unrelated tooling trivia.
+     * Reiterate your sharp verdict: letting LLMs orchestrate all system boundaries dynamically is doomed to chaotic failure; deterministic AI workflows, typed structured context, and sandbox execution are the only viable path to production reliability.
+     * Deliver your concrete verdict as an individual architect and state the single first step engineering teams should take to enforce this boundary (e.g., replace freeform agentic loops with structured pipeline stages running inside isolated execution sandboxes).`;
+
+  const prompt = `You are a distinguished solo software architect and individual technical practitioner writing an authoritative personal technical essay. Based strictly on the provided technical materials${hasSparks ? ' and your personal engineering practice' : ''}, write a deep, rigorous, logical, and beautifully crafted technical analysis essay.
+
+## CRITICAL NARRATIVE VOICE & PERSONA (Strict Rule: Solo Practitioner):
+- **You are a solo expert engineer, NOT a corporate committee, research institute, or editorial board.**
+- **Use singular first-person pronouns ("I", "my", "in my testing", "my recommendation") whenever expressing opinions, engineering decisions, or architectural analyses.**
+- **STRICTLY FORBIDDEN: Do NOT use the editorial "we", "our", or "us" to refer to yourself or your thoughts.** (Only use "we" if quoting an external company like "Anthropic states that 'we built...'").
+- Write with the authentic, sharp, grounded voice of a veteran builder who has actually shipped production code.
 
 ## CRITICAL LANGUAGE REQUIREMENT:
 - The ENTIRE article MUST be written 100% in fluent, professional, idiomatically natural ENGLISH.
@@ -445,27 +635,35 @@ export async function synthesizeFocusedArticle(options: {
 ## Main Title
 # ${options.evalResult.articleTitle}
 
-## Core Topic & Primary Source
+## Core Topic & Sources
 - Topic: ${primary.topicTitle}
-- Tweet Author: ${primary.tweet.authorName} (@${primary.tweet.authorHandle})
-- Tweet Source URL: ${primary.tweet.url}
 - Core Thesis: ${primary.corePerspectiveZh}
+${
+  primary.tweet.blogs && primary.tweet.blogs.length > 0
+    ? `- Primary Canonical Source/Article: "${primary.tweet.blogs[0].title || 'Original Engineering Guide'}" at ${primary.tweet.blogs[0].url}`
+    : ''
+}
+- Industry Discussion Trigger: Tweet by ${primary.tweet.authorName} (@${primary.tweet.authorHandle}) at ${primary.tweet.url}
 
 ## Material (Sole source of factual truth, do not fabricate outside this material)
 ${material}
 
+${creativeSparksBlock}
 ## Structure & Narrative Guidelines:
-1. **Opening: Context, Hook & Problem Intro (Executive Lead)**
-   - The publisher automatically places an initial quote block, but in your lead introduction paragraph, explicitly introduce the problem space and cite the source author's observation along with their original tweet link as Markdown.
-   - Example citation format: "As pointed out by [${primary.tweet.authorName} (@${primary.tweet.authorHandle})](${primary.tweet.url}), ...".
-   - Ground the reader immediately in the engineering scenario: who is building what, where does the architecture choke or drift, and what fundamental constraint forces a redesign.
+1. **Opening: Ultra-Concise Executive Hook (Strictly 2 Sentences Maximum)**
+   - **DO NOT write a long essay or bloated block of text for the introduction.** The lead intro before {{HEADER_IMAGE}} / the first H2 section MUST be concise and to the point.
+   - **Sentence 1 (Problem & Attribution)**: In exactly one crisp sentence, articulate the core technical problem/thesis and ground it with proper canonical attribution (linking the primary guide/paper and noting the trigger tweet by [${primary.tweet.authorName} (@${primary.tweet.authorHandle})](${primary.tweet.url})).
+   - **Sentence 2 (Immediate Transition)**: In exactly one punchy sentence, state what this analysis dissects and launch directly into the technical deep-dive below.
+   - **Total intro length**: Maximum 2 sentences. No filler, no rambling background padding.
 2. **Body: Friction → Root-Cause Mechanisms → Architectural Solution & Trade-offs**
    - Use at least 3 distinct H2 headings (## Heading). Keep headings crisp, informative, and engineering-driven.
    - For every section, build a causal chain: describe the real system symptom, isolate the exact failure mode (which state component, retry loop, or consistency boundary breaks), analyze the underlying constraint, and explain the architecture solution with its technical trade-offs.
-   - Whenever referring to insights, findings, or code from the source tweet or linked reports, naturally embed markdown hyperlinks back to the source (e.g. [${primary.tweet.authorName}'s post](${primary.tweet.url}) or relevant linked articles).
+   - Whenever referring to insights, findings, or benchmarks from the primary source or reports, embed markdown hyperlinks directly to the source article.
+${collisionInstruction}
    - Avoid hand-wavy statements like "the problem is obvious" or "it faces huge challenges" without immediately specifying the exact data, throughput, or concurrency failure mode.
 3. **Closing: Synthesis & Engineering Takeaways**
    - Provide a final H2 section (e.g. "## Architectural Takeaways and Pragmatic Rollout") that synthesizes lessons learned, operational invariants, and practical advice for engineering teams.
+${closingInstruction}
    - Close cohesively without introducing disjointed new facts.
 
 ## Formatting & Style:
@@ -474,14 +672,17 @@ ${material}
   - After the lead introduction: \`{{HEADER_IMAGE}}\`
   - In the core architectural mechanism section: \`{{SVG_ARCH}}\`
   - In the execution flow or sequence interaction section: \`{{SVG_SEQ}}\`
-- **Source Links**: Do not append a separate standalone reference list at the very end; the publisher generates the final bibliography block automatically. However, **inline citations in the prose MUST include markdown links to the original tweet: [${primary.tweet.authorName} on X](${primary.tweet.url})**.
+- **Source Links**: Do not append a separate standalone reference list at the very end; the publisher generates the final bibliography block automatically. Always link primary canonical articles and the discussing tweet inline where appropriate.
 
 Output ONLY the markdown content of the article (no markdown code fence wrapper around the whole document).
 
 ## FINAL REMINDER (violations fail validation and force a rewrite)
 1. Every sentence — including the H1 title, every H2 heading and every quote — must be ENGLISH. Chinese characters anywhere in the output are rejected.
-2. Cite exactly ONE tweet: [${primary.tweet.authorName} on X](${primary.tweet.url}). Do not introduce, mention or link any other tweet or author handle.
-3. The first line must be an English H1 title starting with a single hash and a space.`;
+2. The primary thesis must be credited to its original source / author (e.g. Anthropic/Claude canonical guide if discussing Claude's article), while treating the tweet as practitioner commentary.
+3. The first line must be an English H1 title starting with a single hash and a space.
+4. Voice: Speak as an individual technical expert ("I", "my"). NEVER use the editorial "we" or "our" when discussing your viewpoints, analysis, or solutions.
+5. Practice collision convergence: If a practice collision point is provided, the article must converge and definitively conclude on this exact point without digressing into unrelated tangents.
+6. The practice-collision lens (if present) represents your own personal engineering experience and recommendation, NOT a claim made by the source tweet. Attribute it in the first person, e.g. 'Based on my own production experience, I strongly recommend...', and clearly separate it from the tweet's argument; never phrase it as if the tweet itself asserted it.`;
 
   const problems: string[] = [];
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -497,31 +698,81 @@ Output ONLY the markdown content of the article (no markdown code fence wrapper 
       ],
       context: { stage: 'xdev', task: 'article-synthesis' },
       timeoutMs: 180_000,
-      // Thinking is off here on purpose. `reasoning_effort` cannot bound it:
-      // measured over 3 samples each, "low" ranged 402-2776 reasoning chars
-      // while the no-parameter baseline ranged 757-1439, i.e. variance swamps
-      // the setting. With thinking left on, this single call once ran 26 minutes
-      // / 138k reasoning chars auditing its own draft sentence by sentence
-      // ("Potential issue: … Good.") and never converged.
       thinking: false,
     });
 
     const body = stripCodeFence(res.content);
     const issues = validateArticleBody(body, material);
     if (issues.length === 0) {
-      return assembleArticle(body, {
-        articleTitle: options.evalResult.articleTitle,
-        summary: options.evalResult.executiveSummaryZh,
-        headerImagePath: options.headerImagePath,
-        svgArchitecture: options.svgArchitecture,
-        svgSequence: options.svgSequence,
-      });
+      return body;
     }
     problems.push(`第 ${attempt} 次: ${issues.join('、')}`);
     console.warn(pc.yellow(`  ⚠ [article] 第 ${attempt} 次成稿不合规: ${issues.join('、')}`));
   }
 
   throw new Error(`[article] LLM 连续两次未产出合规正文（禁止用模板兜底）: ${problems.join(' | ')}`);
+}
+
+/**
+ * Assemble final article markdown with header image and newly generated SVGs.
+ */
+export function assembleArticle(
+  rawBody: string,
+  meta: {
+    articleTitle: string;
+    headerImagePath?: string;
+    svgArchitecture: string;
+    svgSequence: string;
+  }
+): string {
+  let body = rawBody.trim();
+
+  // Ensure title at the beginning
+  if (!body.startsWith('# ')) {
+    body = `# ${meta.articleTitle}\n\n${body}`;
+  }
+
+  const headerMd = meta.headerImagePath
+    ? `![Multi-Agent Architecture Header](./${path.basename(meta.headerImagePath)})`
+    : '';
+
+  // Header image placeholder
+  if (body.includes('{{HEADER_IMAGE}}')) {
+    body = body.replace('{{HEADER_IMAGE}}', headerMd);
+  }
+
+  // Insert clean header without rigid academic metadata
+  const lines = body.split('\n');
+  const titleIdx = lines.findIndex((l) => l.startsWith('# '));
+  const frontMatter: string[] = [''];
+  if (meta.headerImagePath && !body.includes(path.basename(meta.headerImagePath))) {
+    frontMatter.push(headerMd, '');
+  }
+  if (frontMatter.length > 1) {
+    lines.splice(titleIdx + 1, 0, ...frontMatter);
+  }
+  body = lines.join('\n');
+
+  // Insert SVG diagrams (replace placeholder or append naturally)
+  if (body.includes('{{SVG_ARCH}}')) {
+    body = body.replace('{{SVG_ARCH}}', `\n\n${meta.svgArchitecture}\n\n`);
+  } else {
+    const h2Idx = body.indexOf('## ');
+    if (h2Idx !== -1) {
+      const nextLine = body.indexOf('\n', h2Idx);
+      body = body.slice(0, nextLine) + `\n\n${meta.svgArchitecture}\n\n` + body.slice(nextLine);
+    } else {
+      body += `\n\n${meta.svgArchitecture}\n\n`;
+    }
+  }
+
+  if (body.includes('{{SVG_SEQ}}')) {
+    body = body.replace('{{SVG_SEQ}}', `\n\n${meta.svgSequence}\n\n`);
+  } else {
+    body += `\n\n${meta.svgSequence}\n\n`;
+  }
+
+  return body.replace(/\n{4,}/g, '\n\n\n').trimEnd() + '\n';
 }
 
 /** Everything the writer is allowed to know about. */
@@ -566,8 +817,8 @@ export function validateArticleBody(body: string, material: string): string[] {
     issues.push('正文内容过少或为空 (Article body too short or empty)');
   }
 
-  // Anti-template gate: if the material never mentions Anthropic, the article must not hallucinate it
-  if (!/anthropic/i.test(material) && /anthropic/i.test(body)) {
+  // Anti-template gate: only flag Anthropic if neither material nor primary perspective mentions it
+  if (!/anthropic|claude/i.test(material) && /anthropic/i.test(body)) {
     issues.push('正文出现素材中不存在的 Anthropic 引用（疑似套用旧模板）');
   }
 
@@ -621,7 +872,7 @@ export function validateArticleBody(body: string, material: string): string[] {
   const firstHeadingIdx = body.search(/^##\s+/m);
   if (firstHeadingIdx > 0) {
     const intro = body.slice(0, firstHeadingIdx).replace(/^#\s+.*$/m, '').trim();
-    if (intro.length < 60) {
+    if (intro.length < 30) {
       issues.push('首段导读过短：标题之后、第一个小标题之前必须有交代背景与问题的导读段落');
     }
   }
@@ -629,63 +880,4 @@ export function validateArticleBody(body: string, material: string): string[] {
   return issues;
 }
 
-function assembleArticle(
-  rawBody: string,
-  meta: {
-    articleTitle: string;
-    summary: string;
-    headerImagePath?: string;
-    svgArchitecture: string;
-    svgSequence: string;
-  }
-): string {
-  const dateStr = new Date().toISOString().split('T')[0];
-  let body = rawBody.trim();
 
-  // Ensure title at the beginning
-  if (!body.startsWith('# ')) {
-    body = `# ${meta.articleTitle}\n\n${body}`;
-  }
-
-  const headerMd = meta.headerImagePath
-    ? `![Multi-Agent Architecture Header](./${path.basename(meta.headerImagePath)})`
-    : '';
-
-  // Header image placeholder
-  if (body.includes('{{HEADER_IMAGE}}')) {
-    body = body.replace('{{HEADER_IMAGE}}', headerMd);
-  }
-
-  // Insert clean header without rigid academic metadata
-  const lines = body.split('\n');
-  const titleIdx = lines.findIndex((l) => l.startsWith('# '));
-  const frontMatter: string[] = [''];
-  if (meta.headerImagePath && !body.includes(path.basename(meta.headerImagePath))) {
-    frontMatter.push(headerMd, '');
-  }
-  if (frontMatter.length > 1) {
-    lines.splice(titleIdx + 1, 0, ...frontMatter);
-  }
-  body = lines.join('\n');
-
-  // Insert SVG diagrams (replace placeholder or append naturally)
-  if (body.includes('{{SVG_ARCH}}')) {
-    body = body.replace('{{SVG_ARCH}}', `\n\n${meta.svgArchitecture}\n\n`);
-  } else {
-    const h2Idx = body.indexOf('## ');
-    if (h2Idx !== -1) {
-      const nextLine = body.indexOf('\n', h2Idx);
-      body = body.slice(0, nextLine) + `\n\n${meta.svgArchitecture}\n\n` + body.slice(nextLine);
-    } else {
-      body += `\n\n${meta.svgArchitecture}\n\n`;
-    }
-  }
-
-  if (body.includes('{{SVG_SEQ}}')) {
-    body = body.replace('{{SVG_SEQ}}', `\n\n${meta.svgSequence}\n\n`);
-  } else {
-    body += `\n\n${meta.svgSequence}\n\n`;
-  }
-
-  return body.replace(/\n{4,}/g, '\n\n\n').trimEnd() + '\n';
-}

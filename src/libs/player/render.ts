@@ -7,19 +7,25 @@
  * image2pipe encoder. The encoded silent video is then muxed with the edge-tts
  * narration track.
  *
- * Browser engine (final video rendering stage runs on the LOCAL Firefox):
- *   - `firefox` (default): system Firefox via Playwright's WebDriver BiDi
+ * Browser engine (default: the project's Ungoogled Chromium):
+ *   - `chromium` (default): the project's Ungoogled Chromium via an explicit
+ *     `browserPath` (or the auto-detected path).
+ *   - `firefox`: system Firefox via Playwright's WebDriver BiDi
  *     transport (`channel: 'moz-firefox'`). On Ubuntu the Firefox package is a
  *     snap with strict confinement, so the persistent render profile must live
  *     under `~/snap/firefox/common/` — /tmp profiles are rejected with
  *     "Could not find profile folder".
- *   - `chromium`: the project's Ungoogled Chromium via an explicit
- *     `browserPath` (or the auto-detected path), matching the legacy behavior.
  *
- * The engine is explicit — there is no silent cross-engine fallback. Set
- * `EXPLAINER_RENDER_ENGINE=chromium` (or pass `engine`) to leave Firefox.
+ * The engine is explicit — there is no silent cross-engine fallback. Override
+ * with `EXPLAINER_RENDER_ENGINE=firefox|chromium` or the `engine` parameter.
+ *
+ * Chunk resume: `.render-chunks/manifest.json` records a hash of everything
+ * that affects the rendered pixels (timeline, style, voice, player JS). A
+ * mismatch wipes the chunk directory so a changed script/style never produces
+ * a video stitched from stale chunks (P0/B2).
  */
 import http from 'node:http';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -152,6 +158,9 @@ export async function serveExplainerDir(dir: string): Promise<StaticServer> {
 }
 export const serveTutorialDir = serveExplainerDir;
 
+/** Default x264 preset for every chunk encode (shared by produce + host script). */
+export const DEFAULT_ENCODE_PRESET = 'medium';
+
 export interface LaunchRenderBrowserParams {
   engine?: ExplainerRenderEngine;
   browserPath?: string;
@@ -170,10 +179,9 @@ export interface LaunchRenderBrowserResult {
 /**
  * Launches the render browser for the final video rendering stage.
  *
- * Defaults to the LOCAL Firefox (`engine: 'firefox'`, overridable via
- * EXPLAINER_RENDER_ENGINE). Pass `engine: 'chromium'` (with an optional
- * `browserPath`) for the legacy Chromium path. Failures surface loudly on the
- * requested engine — never a silent engine switch.
+ * Defaults to Chromium (`engine: 'chromium'`, overridable via
+ * EXPLAINER_RENDER_ENGINE). Failures surface loudly on the requested engine —
+ * never a silent engine switch.
  */
 export async function launchRenderBrowser(
   params: LaunchRenderBrowserParams
@@ -182,8 +190,8 @@ export async function launchRenderBrowser(
   const explicitEngine =
     params.engine ?? (envEngine === 'firefox' || envEngine === 'chromium' ? envEngine : undefined);
 
-  // Default is 'firefox'. Overridable via EXPLAINER_RENDER_ENGINE or explicit param.
-  const engine: ExplainerRenderEngine = explicitEngine ?? 'firefox';
+  // Default is 'chromium'. Overridable via EXPLAINER_RENDER_ENGINE or explicit param.
+  const engine: ExplainerRenderEngine = explicitEngine ?? 'chromium';
 
   if (explicitEngine === 'firefox' && params.browserPath) {
     throw new Error(
@@ -201,13 +209,13 @@ export async function launchRenderBrowser(
       await fsp.rm(path.join(profileDir, lockFile), { force: true }).catch(() => undefined);
     }
 
-    const customFfPath =
+    // Resolve Firefox from an explicit env override, else from playwright-core's
+    // own registry — never from a hardcoded user-home path (P0/B6).
+    const envFfPath =
       process.env.FIREFOX_PATH ||
       process.env.EXPLAINER_RENDER_FIREFOX_PATH ||
-      process.env.TUTORIAL_RENDER_FIREFOX_PATH ||
-      (fs.existsSync('/home/piagent/.cache/ms-playwright/firefox-1555/firefox/firefox')
-        ? '/home/piagent/.cache/ms-playwright/firefox-1555/firefox/firefox'
-        : undefined);
+      process.env.TUTORIAL_RENDER_FIREFOX_PATH;
+    const customFfPath = envFfPath || firefox.executablePath();
 
     const isHeadless =
       (process.env.EXPLAINER_RENDER_HEADLESS || process.env.TUTORIAL_RENDER_HEADLESS) === 'true';
@@ -247,6 +255,9 @@ export async function launchRenderBrowser(
       '--ignore-gpu-blocklist',
       '--enable-gpu-rasterization',
       '--enable-zero-copy',
+      // WebGL: hardware accelerated by default; the player probes the context
+      // and falls back to Canvas2D when it cannot be created.
+      '--enable-unsafe-webgpu',
     ],
   });
   const page = await browser.newPage({ viewport: { width, height } });
@@ -256,7 +267,9 @@ export async function launchRenderBrowser(
 
 export interface RenderExplainerVideoParams {
   /** Explainer bundle directory containing explainer-player.html and assets. */
-  explainerDir: string;
+  explainerDir?: string;
+  /** Legacy alias for explainerDir. */
+  tutorialDir?: string;
   /** Timeline with resolution, fps and total duration. */
   timeline: {
     resolution: { width: number; height: number };
@@ -271,13 +284,22 @@ export interface RenderExplainerVideoParams {
   engine?: ExplainerRenderEngine;
   /** Chromium executable path (engine 'chromium' only; auto-detected if omitted). */
   browserPath?: string;
+  /** Persistent browser profile dir (defaults to a temp dir per render). */
+  profileDir?: string;
   concurrency?: number;
   crf?: number;
   preset?: string;
+  /**
+   * Frame transfer mode: `raw` (default — RGBA readback from the canvas →
+   * ffmpeg `-f rawvideo`, skips PNG encode/decode) or `png` (Playwright
+   * screenshot). The WebGL path returns bottom-up pixels so ffmpeg flips it.
+   * Overridable with EXPLAINER_FRAME_EXPORT=raw|png.
+   */
+  frameExport?: 'png' | 'raw';
   logFilePath?: string;
   onProgress?: (renderedFrames: number, totalFrames: number) => void;
 }
-export type RenderTutorialVideoParams = RenderExplainerVideoParams & { tutorialDir?: string };
+export type RenderTutorialVideoParams = RenderExplainerVideoParams;
 
 export interface RenderExplainerVideoResult {
   videoPath: string;
@@ -301,9 +323,14 @@ export function resolveRenderConcurrency(cpuCount: number, override?: number): n
   if (override !== undefined && Number.isFinite(override) && override > 0) {
     return Math.max(1, Math.floor(override));
   }
-  // With shared-browser multi-tab architecture, 2 concurrent tabs run safely
-  // within ~500MB RAM even on a 2-core machine, tripling render speed.
-  return Math.max(1, Math.min(4, Math.floor(cpuCount || 2)));
+  // Shared-browser multi-tab rendering: every 1080p tab holds a SwiftShader WebGL
+  // context plus ~8 MB readback buffers per frame, so RAM — not core count — is the
+  // real limit. 2026-11-03: 2 tabs on a 2-core box with 1.9 GB free crashed the
+  // renderer ("page.evaluate: Target crashed") 60 frames in.
+  const PER_TAB_BUDGET_MB = 1500;
+  const availableMb = Math.floor(os.freemem() / (1024 * 1024));
+  const byMemory = Math.max(1, Math.floor(availableMb / PER_TAB_BUDGET_MB));
+  return Math.max(1, Math.min(4, Math.floor(cpuCount || 2), byMemory));
 }
 
 /**
@@ -315,12 +342,75 @@ export function resolveFrameTimeoutMs(override?: number): number {
 }
 
 /**
+ * Hash of everything that affects the rendered pixels: the player JS/HTML, the
+ * assembled timeline, the style document and the voice timing. Used as the
+ * `.render-chunks/manifest.json` cache key.
+ */
+export async function computeRenderHash(
+  explainerDir: string,
+  timeline: unknown,
+  outVideoPath: string
+): Promise<string> {
+  const hash = crypto.createHash('sha256');
+  hash.update(JSON.stringify(timeline));
+  hash.update(path.basename(outVideoPath));
+  for (const name of [
+    'explainer-player.js',
+    'explainer-player.html',
+    'explainer.json',
+    'style.json',
+    'voice.json',
+  ]) {
+    const filePath = path.join(explainerDir, name);
+    const content = await fsp.readFile(filePath).catch(() => null);
+    hash.update(name);
+    hash.update(content ?? Buffer.from('missing'));
+  }
+  return hash.digest('hex').slice(0, 32);
+}
+
+/**
+ * Validates the chunk manifest. Any hash mismatch wipes the cached chunks so a
+ * changed script/style can never be stitched together with stale segments.
+ * Returns the number of chunks that were discarded.
+ */
+export async function ensureChunkManifest(chunkDir: string, renderHash: string): Promise<number> {
+  const manifestPath = path.join(chunkDir, 'manifest.json');
+  let previous: string | null = null;
+  try {
+    const raw = await fsp.readFile(manifestPath, 'utf-8');
+    previous = JSON.parse(raw).hash ?? null;
+  } catch {
+    previous = null;
+  }
+
+  let discarded = 0;
+  if (previous !== renderHash) {
+    const entries = await fsp.readdir(chunkDir).catch(() => [] as string[]);
+    for (const entry of entries) {
+      if (!entry.startsWith('chunk-') && entry !== 'concat-list.txt') continue;
+      await fsp.rm(path.join(chunkDir, entry), { force: true, recursive: true }).catch(() => undefined);
+      if (entry.startsWith('chunk-')) discarded += 1;
+    }
+    await fsp.writeFile(
+      manifestPath,
+      JSON.stringify({ hash: renderHash, updatedAt: new Date().toISOString() }, null, 2) + '\n',
+      'utf-8'
+    );
+  }
+  return discarded;
+}
+
+/**
  * Renders the player frame-by-frame into a video and muxes the narration track.
  */
 export async function renderExplainerVideo(
-  params: RenderExplainerVideoParams | (RenderTutorialVideoParams & { tutorialDir?: string })
+  params: RenderExplainerVideoParams
 ): Promise<RenderExplainerVideoResult> {
-  const explainerDir = (params as any).explainerDir || (params as any).tutorialDir;
+  const explainerDir = params.explainerDir || params.tutorialDir;
+  if (!explainerDir) {
+    throw new Error('renderExplainerVideo requires explainerDir (or the legacy tutorialDir alias)');
+  }
   const { timeline, narrationWavPath, outVideoPath } = params;
   const { width, height } = timeline.resolution;
   const fps = timeline.fps;
@@ -332,12 +422,21 @@ export async function renderExplainerVideo(
   const chunkDir = path.join(path.dirname(outVideoPath), '.render-chunks');
   await fsp.mkdir(chunkDir, { recursive: true });
 
+  const renderHash = await computeRenderHash(explainerDir, timeline, outVideoPath);
+  const discardedChunks = await ensureChunkManifest(chunkDir, renderHash);
+  if (discardedChunks > 0) {
+    console.log(
+      `[render] invalidated ${discardedChunks} stale chunk(s): timeline/style/voice/player changed`
+    );
+  }
+
   const server = await serveExplainerDir(explainerDir);
   const CHUNK_SIZE = 1000; // 1000 frames (~33s) per segment with fresh browser connection
 
   try {
     const envEngine = process.env.EXPLAINER_RENDER_ENGINE || process.env.TUTORIAL_RENDER_ENGINE;
-    const engine = params.engine ?? (envEngine === 'firefox' || envEngine === 'chromium' ? envEngine : 'firefox');
+    const engine =
+      params.engine ?? (envEngine === 'firefox' || envEngine === 'chromium' ? envEngine : 'chromium');
 
     // Dual-thread concurrent chunk renderer
     const chunkTasks: Array<{ startFrame: number; endFrame: number; chunkFilePath: string }> = [];
@@ -350,6 +449,7 @@ export async function renderExplainerVideo(
 
     const chunkFiles: string[] = chunkTasks.map((t) => t.chunkFilePath);
     let overallRendered = 0;
+    const renderStartedAt = Date.now();
 
     const cpuCount = os.cpus()?.length || 2;
     const concurrencyEnv = process.env.EXPLAINER_RENDER_CONCURRENCY || process.env.TUTORIAL_RENDER_CONCURRENCY;
@@ -367,7 +467,9 @@ export async function renderExplainerVideo(
 
     // Launch ONE shared browser instance; concurrent workers each use an isolated tab (page)
     // within the same process to eliminate multi-process memory overhead while maximizing throughput.
-    const sharedProfileDir = path.join(os.tmpdir(), `aigc-render-shared-${Date.now()}`);
+    const sharedProfileDir = params.profileDir
+      ? path.resolve(params.profileDir)
+      : path.join(os.tmpdir(), `aigc-render-shared-${Date.now()}`);
     await fsp.mkdir(sharedProfileDir, { recursive: true });
 
     let sharedBrowser: Browser | BrowserContext | null = null;
@@ -403,6 +505,47 @@ export async function renderExplainerVideo(
           const bootErr = await workerPage!.evaluate('window.__explainerError || window.__tutorialError || null');
           if (bootErr) throw new Error(`explainer player failed to boot: ${bootErr}`);
 
+          // Report the renderer that actually came up (hardware GL, SwiftShader or
+          // the Canvas2D fallback) so a silent downgrade is visible in the log.
+          let playerRenderer = 'canvas2d';
+          const diag = await workerPage!.evaluate(() => {
+            const api: any = (window as any).__explainer || (window as any).__tutorial || {};
+            return {
+              renderer: api.renderer || 'unknown',
+              rendererInfo: api.rendererInfo || '',
+              warnings: Array.isArray(api.warnings) ? api.warnings : [],
+            };
+          });
+          playerRenderer = diag.renderer;
+          if (workerId === 1) {
+            console.log(`[render] player renderer: ${diag.renderer} (${diag.rendererInfo || 'n/a'})`);
+            for (const warning of diag.warnings) console.warn(`[render] player warning: ${warning}`);
+          }
+
+          // Frame transfer mode: `raw` reads RGBA straight out of the canvas
+          // (bottom-up for WebGL, flipped in ffmpeg) and skips PNG entirely.
+          // Measured ~30% faster per frame than PNG screenshots on real GPUs
+          // (see Docs/plan-explainer-video-style-and-webgl.md).
+          //
+          // On SOFTWARE GL (SwiftShader/llvmpipe) the readback path is what kills
+          // the tab: 8.3 MB readPixels + an ~11 MB base64 hop per frame crashed the
+          // renderer at frame ~60 on 2026-11-03, twice, on an idle 2-core box.
+          // Playwright's native PNG screenshot never materialises those buffers.
+          const softwareGl = /swiftshader|llvmpipe|software/i.test(diag.rendererInfo || '');
+          const explicitFrameExport =
+            params.frameExport ??
+            (process.env.EXPLAINER_FRAME_EXPORT === 'png'
+              ? 'png'
+              : process.env.EXPLAINER_FRAME_EXPORT
+                ? 'raw'
+                : undefined);
+          const frameMode: 'png' | 'raw' = explicitFrameExport ?? (softwareGl ? 'png' : 'raw');
+          if (workerId === 1 && !explicitFrameExport && softwareGl) {
+            console.log('[render] software GL detected → PNG frame export (raw readPixels crashes the tab)');
+          }
+          // WebGL readPixels is bottom-up; Canvas2D getImageData is top-down.
+          const needsFlip = playerRenderer !== 'canvas2d';
+
           await workerPage!.evaluate(() => {
             document.documentElement.classList.add('render-mode');
             document.body.classList.add('render-mode');
@@ -415,6 +558,10 @@ export async function renderExplainerVideo(
             if (!currentTask) break;
 
             const { startFrame, endFrame, chunkFilePath } = currentTask;
+            // Encode into a `.part` file and rename on success: a renderer crash
+            // used to leave a truncated chunk behind that auto-resume then trusted
+            // (size > 10 KB, but no moov atom → corrupt final video).
+            const partFilePath = `${chunkFilePath}.part`;
 
             // Check if already rendered (Auto-Resume)
             try {
@@ -425,17 +572,22 @@ export async function renderExplainerVideo(
                 continue;
               }
             } catch {}
+            await fsp.rm(partFilePath, { force: true }).catch(() => undefined);
 
             let chunkFfmpeg: ReturnType<typeof spawn> | null = null;
+            let chunkCommitted = false;
 
             try {
-              const ffmpegPreset = params.preset || 'ultrafast';
+              const ffmpegPreset = params.preset || DEFAULT_ENCODE_PRESET;
+              const inputArgs =
+                frameMode === 'raw'
+                  ? ['-f', 'rawvideo', '-pix_fmt', 'rgba', '-s', `${width}x${height}`, '-r', String(fps), '-i', 'pipe:0']
+                  : ['-f', 'image2pipe', '-framerate', String(fps), '-i', 'pipe:0'];
+              const filter = frameMode === 'raw' && needsFlip ? 'vflip,setsar=1/1' : 'setsar=1/1';
               chunkFfmpeg = spawn('ffmpeg', [
                 '-y',
-                '-f', 'image2pipe',
-                '-framerate', String(fps),
-                '-i', 'pipe:0',
-                '-vf', 'setsar=1/1',
+                ...inputArgs,
+                '-vf', filter,
                 '-aspect', '16:9',
                 '-c:v', 'libx264',
                 '-preset', ffmpegPreset,
@@ -443,7 +595,10 @@ export async function renderExplainerVideo(
                 '-crf', String(params.crf ?? 20),
                 '-pix_fmt', 'yuv420p',
                 '-r', String(fps),
-                chunkFilePath,
+                // The output is a `.part` file (renamed on success), so the muxer
+                // cannot be inferred from the extension.
+                '-f', 'mp4',
+                partFilePath,
               ]);
 
               const stdin = chunkFfmpeg.stdin!;
@@ -464,6 +619,36 @@ export async function renderExplainerVideo(
                       const api = window.__explainer || window.__tutorial;
                       return api!.seek(time);
                     }, t);
+                    if (frameMode === 'raw') {
+                      const b64 = await workerPage!.evaluate(async () => {
+                        const canvas = document.getElementById('stage') as HTMLCanvasElement;
+                        const w = canvas.width;
+                        const h = canvas.height;
+                        const gl = (canvas.getContext('webgl2') || canvas.getContext('webgl')) as
+                          | WebGLRenderingContext
+                          | null;
+                        let bytes: Uint8Array;
+                        if (gl) {
+                          bytes = new Uint8Array(w * h * 4);
+                          gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+                        } else {
+                          const ctx = canvas.getContext('2d')!;
+                          bytes = new Uint8Array(ctx.getImageData(0, 0, w, h).data);
+                        }
+                        // Native base64 via Blob + FileReader. The previous
+                        // String.fromCharCode concat built an ~11 MB rope per frame
+                        // inside the renderer and was the main heap-churn source.
+                        const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/octet-stream' });
+                        const dataUrl: string = await new Promise<string>((resolve, reject) => {
+                          const fr = new FileReader();
+                          fr.onload = () => resolve(String(fr.result));
+                          fr.onerror = () => reject(fr.error ?? new Error('FileReader failed'));
+                          fr.readAsDataURL(blob);
+                        });
+                        return dataUrl.slice(dataUrl.indexOf(',') + 1);
+                      });
+                      return Buffer.from(b64, 'base64');
+                    }
                     return await workerPage!.screenshot({ type: 'png' });
                   })(),
                   new Promise<null>((r) => setTimeout(() => r(null), FRAME_TIMEOUT_MS)),
@@ -481,6 +666,16 @@ export async function renderExplainerVideo(
                 });
 
                 overallRendered++;
+                const elapsedSec = (Date.now() - renderStartedAt) / 1000;
+                const perFrame = overallRendered > 0 ? elapsedSec / overallRendered : 0;
+                const etaSec = Math.max(0, Math.round(perFrame * (totalFrames - overallRendered)));
+                if (overallRendered % 30 === 0 || overallRendered === totalFrames) {
+                  console.log(
+                    `[render] ${overallRendered}/${totalFrames} frames · ${perFrame.toFixed(2)} s/frame · ETA ${Math.floor(
+                      etaSec / 60
+                    )}m${String(etaSec % 60).padStart(2, '0')}s`
+                  );
+                }
                 params.onProgress?.(overallRendered, totalFrames);
               }
 
@@ -489,9 +684,14 @@ export async function renderExplainerVideo(
               if (code !== 0) {
                 throw new Error(`ffmpeg chunk encode failed (${code}): ${Buffer.concat(stderrChunks).toString('utf8').slice(-400)}`);
               }
+              await fsp.rename(partFilePath, chunkFilePath);
+              chunkCommitted = true;
             } finally {
               if (chunkFfmpeg && !chunkFfmpeg.killed) {
                 chunkFfmpeg.kill('SIGKILL');
+              }
+              if (!chunkCommitted) {
+                await fsp.rm(partFilePath, { force: true }).catch(() => undefined);
               }
             }
           }
@@ -547,6 +747,14 @@ export async function renderExplainerVideo(
       '+faststart',
       outVideoPath,
     ]);
+
+    // Chunks are scratch data: keep them only when explicitly requested for
+    // debugging (EXPLAINER_KEEP_CHUNKS=1), otherwise delete (~63MB per run).
+    if (process.env.EXPLAINER_KEEP_CHUNKS !== '1' && process.env.TUTORIAL_KEEP_CHUNKS !== '1') {
+      await fsp.rm(chunkDir, { recursive: true, force: true }).catch(() => undefined);
+    } else {
+      console.log(`[render] kept render chunks (EXPLAINER_KEEP_CHUNKS=1): ${chunkDir}`);
+    }
 
     return {
       videoPath: outVideoPath,

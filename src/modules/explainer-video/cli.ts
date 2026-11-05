@@ -17,6 +17,8 @@ async function main() {
     .option('-q, --query <string>', 'Topic query', 'new model')
     .option('--fps <number>', 'Video frame rate', (v) => parseInt(v, 10), 30)
     .option('--engine <engine>', 'Render engine (chromium, firefox)', 'chromium')
+    .option('--style <path|preset:name>', 'Style (effects) document: JSON path or preset:ember-dark|cyan-tech|apple-clean')
+    .option('--transition <name>', 'Force one clip transition shader')
     .action(async (evalJsonPath, harvestJsonPath, opts) => {
       const outDir = path.resolve(opts.outDir);
       console.log(pc.cyan(`\n🎬 Generating explainer video in: ${outDir}...`));
@@ -32,6 +34,8 @@ async function main() {
           outDir,
           fps: opts.fps,
           engine: opts.engine,
+          style: opts.style,
+          transition: opts.transition,
           onProgress: (stage, msg) => console.log(pc.dim(`[explainer-video] [${stage}] ${msg}`)),
         });
 

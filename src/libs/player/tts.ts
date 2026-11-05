@@ -12,6 +12,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { loadEnvFile } from '../../utils/env.js';
+import { resolveComponentRef, resolveTitleSafe, type ExplainerStyle } from './style.js';
+import { locatePhraseTiming } from './phrase.js';
 import type {
   ExplainerWord,
   ExplainerClip,
@@ -173,7 +175,22 @@ async function executeSingleQwen3TtsAttempt(
 
   try {
     while (true) {
-      const { value, done } = await reader.read();
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch (streamErr: any) {
+        // The shared ZeroGPU Space serves one session at a time; a parallel
+        // request or a proxy reset kills the SSE socket mid-generation and
+        // undici reports the bare word "terminated". Classify it so the retry
+        // wrapper above can back off and try again instead of failing the stage.
+        const dropped: any = new Error(
+          `Qwen3-TTS queue stream terminated before completion (session ${sessionHash}): ${streamErr?.message || String(streamErr)}`
+        );
+        dropped.code = 'TTS_STREAM_TERMINATED';
+        dropped.retryable = true;
+        throw dropped;
+      }
+      const { value, done } = chunk;
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
@@ -319,6 +336,12 @@ export async function synthesizeQwen3Tts(
         err?.name === 'TimeoutError' ||
         /aborted due to timeout|timed out|timeout/i.test(errMsg);
 
+      // A dropped SSE socket is transient: the Space was busy or the proxy reset
+      // the connection. Back off and retry instead of failing the whole stage.
+      const isStreamDropped =
+        err?.code === 'TTS_STREAM_TERMINATED' ||
+        /stream terminated|socket hang up|ECONNRESET|other side closed|fetch failed/i.test(errMsg);
+
       // If a free Hugging Face token is rejected because free account quota is 0s,
       // drop the token to let the request use the proxy IP quota.
       if (currentToken && errMsg.includes('free ZeroGPU quota')) {
@@ -333,6 +356,15 @@ export async function synthesizeQwen3Tts(
         console.warn(
           `[tts] Qwen3-TTS request timed out after ${Math.round(timeoutMs / 1000)}s; retrying ${attempt + 1}/${maxRetries}...`
         );
+        continue;
+      }
+
+      if (isStreamDropped && attempt < maxRetries) {
+        const backoffMs = 3000 * attempt;
+        console.warn(
+          `[tts] Qwen3-TTS stream dropped mid-generation (${errMsg.slice(0, 120)}); retrying ${attempt + 1}/${maxRetries} after ${backoffMs}ms...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
         continue;
       }
 
@@ -855,29 +887,25 @@ export async function extractAndResampleAudio(params: {
   ]);
 }
 
-/** Timing constants matching OpusVideo engine specs (in seconds). */
-export const OPUS_TIMING = {
-  TITLE_SAFE: 2.30,  // chapter title card intro + hold + outro
-  CLIP_TAIL: 0.50,   // clean clip tail transition
-  LINE_GAP: 0.12,    // breathing space between lines in a shot
-  SHOT_GAP: 0.18,    // breathing space between shots
-};
-
 /**
- * Builds the OpusVideo-aligned voice track and voice.json synchronization metadata.
- * Inserts exact title-safe and transition silences so the full audio duration
- * is 1:1 identical to the procedural visual timeline.
+ * @deprecated Timing now lives in style.json (`ExplainerStyle.timing`).
+ * Kept only for backwards-compatible imports; do not read these constants.
  */
-export interface OpusVoiceTrackResult {
-  wavPath: string;
-  mp3Path: string;
-  voiceData: ExplainerVoiceData;
-  totalDurationSec: number;
-}
+export const OPUS_TIMING = {
+  TITLE_SAFE: 2.3,
+  CLIP_TAIL: 0.5,
+  LINE_GAP: 0.12,
+  SHOT_GAP: 0.18,
+} as const;
 
-export async function buildOpusVoiceTrack(params: {
+export interface BuildOpusVoiceTrackParams {
   clips: ExplainerClip[];
   outAudioDir: string;
+  /**
+   * Resolved style document. It is the single source of truth for every
+   * silence/duration constant and for the `final-showcase` audio policy.
+   */
+  style: ExplainerStyle;
   assets?: ExplainerAsset[];
   voice?: string;
   rate?: string;
@@ -887,215 +915,350 @@ export async function buildOpusVoiceTrack(params: {
   onProgress?: (message: string) => void;
   /** Per-line TTS request timeout in milliseconds. */
   ttsTimeoutMs?: number;
-}): Promise<OpusVoiceTrackResult> {
-  const { clips, outAudioDir } = params;
+  /** Max concurrent TTS line requests (default 2, override with EXPLAINER_TTS_CONCURRENCY). */
+  concurrency?: number;
+}
+
+export interface OpusVoiceTrackResult {
+  wavPath: string;
+  mp3Path: string;
+  voiceData: ExplainerVoiceData;
+  totalDurationSec: number;
+}
+
+interface VoiceLineJob {
+  index: number;
+  clipIndex: number;
+  shotIndex: number;
+  lineIndex: number;
+  text: string;
+  /** On-screen element phrase (excerpt of `text`). */
+  phrase: string;
+  refId: string;
+  /** Component source asset (final-showcase): its own audio replaces the TTS line. */
+  sourceAssetId?: string;
+  sourceAsset?: ExplainerAsset;
+}
+
+interface VoiceLineResult {
+  /** Absolute audio duration contributed by this line. */
+  aDur: number;
+  /** Path of the concatenation part for this line. */
+  partPath: string;
+  words: ExplainerWord[];
+  chars: Array<{ c: string; t: number }>;
+}
+
+/**
+ * Resolves the TTS concurrency limit.
+ *
+ * Default is 1: the Qwen3-TTS HF Space is a single-session ZeroGPU app, and two
+ * concurrent SSE sessions make the Space drop one of them mid-generation
+ * (observed 2026-11-03: `terminated` 26s into a 5-line narration). Raise it via
+ * `EXPLAINER_TTS_CONCURRENCY` only against a TTS endpoint that can take it.
+ */
+export function resolveTtsConcurrency(override?: number): number {
+  if (override !== undefined && Number.isFinite(override) && override > 0) {
+    return Math.max(1, Math.floor(override));
+  }
+  const env = Number(process.env.EXPLAINER_TTS_CONCURRENCY || process.env.TUTORIAL_TTS_CONCURRENCY);
+  if (Number.isFinite(env) && env > 0) return Math.max(1, Math.floor(env));
+  return 1;
+}
+
+/**
+ * Builds the narration track and voice.json synchronization metadata.
+ *
+ * Pure with respect to the storyboard: it never writes `vStart/vDur/vLines`
+ * back into the clip/shot objects (the player merges voice.json at runtime and
+ * `attachVoiceTimings()` provides an in-memory copy for QA tooling).
+ */
+export async function buildOpusVoiceTrack(
+  params: BuildOpusVoiceTrackParams
+): Promise<OpusVoiceTrackResult> {
+  const { clips, outAudioDir, style } = params;
   const voice = params.voice && params.voice !== 'local-clone' ? params.voice : 'Ryan';
   const rate = params.rate ?? '+0%';
   const sampleRate = params.sampleRate ?? 44100;
+  const timing = style.timing;
+  const titleSafe = resolveTitleSafe(timing);
   await fs.mkdir(outAudioDir, { recursive: true });
 
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'opus-voice-work-'));
   const wavPath = path.join(outAudioDir, 'narration.wav');
   const mp3Path = path.join(outAudioDir, 'narration.mp3');
 
-  // Silence generator helper
-  async function makeSilence(durSec: number, filename: string): Promise<string> {
-    const target = path.join(workDir, filename);
-    await execFileAsync('ffmpeg', [
+  // Silence cache: one ffmpeg process per distinct duration instead of one per gap.
+  const silenceCache = new Map<string, Promise<string>>();
+  function makeSilence(durSec: number): Promise<string> {
+    const key = durSec.toFixed(3);
+    const cached = silenceCache.get(key);
+    if (cached) return cached;
+    const target = path.join(workDir, `silence-${key}.wav`);
+    const job = execFileAsync('ffmpeg', [
       '-y',
       '-f',
       'lavfi',
       '-i',
       `anullsrc=r=${sampleRate}:cl=stereo`,
       '-t',
-      durSec.toFixed(3),
+      key,
       '-c:a',
       'pcm_s16le',
       target,
-    ]);
-    return target;
+    ]).then(() => target);
+    silenceCache.set(key, job);
+    return job;
   }
 
-  const audioParts: string[] = [];
-  let currentCursor = 0;
-  let partIndex = 0;
+  const finalShowcase = style.components.finalShowcase;
 
-  const voiceClips: ExplainerVoiceClip[] = [];
+  // 1. Flatten every spoken line into an ordered job list.
+  const jobs: VoiceLineJob[] = [];
+  clips.forEach((clip, ci) => {
+    clip.shots.forEach((shot, si) => {
+      shot.elements.forEach((element, li) => {
+        const text = shot.narration[li] || (element[0] as string);
+        const visualRef = element[1];
+        const refId = typeof visualRef === 'string' ? visualRef : visualRef.assetId || visualRef.name || '';
+        const component = resolveComponentRef(refId, style);
+        const isShowcase = component?.component === 'final-showcase';
+        jobs.push({
+          index: jobs.length,
+          clipIndex: ci,
+          shotIndex: si,
+          lineIndex: li,
+          text,
+          phrase: String(element[0] ?? ''),
+          refId,
+          sourceAssetId: isShowcase
+            ? component!.assetId && component!.assetId.length > 0
+              ? component!.assetId
+              : finalShowcase.asset
+            : undefined,
+        });
+      });
+    });
+  });
+
+  // 2. Synthesize concurrently (bounded), keeping the original order.
+  const concurrency = resolveTtsConcurrency(params.concurrency);
+  const results: VoiceLineResult[] = new Array(jobs.length);
+  let completed = 0;
+  let cursor = 0;
+
+  async function processJob(job: VoiceLineJob): Promise<void> {
+    const partName = `line-${String(job.clipIndex).padStart(3, '0')}-${String(job.shotIndex).padStart(2, '0')}-${String(job.lineIndex).padStart(2, '0')}`;
+    const segWavPath = path.join(workDir, `${partName}.wav`);
+
+    if (job.sourceAssetId) {
+      const asset = (params.assets || []).find((a) => a.id === job.sourceAssetId);
+      if (!asset) {
+        throw new Error(
+          `component:final-showcase references asset "${job.sourceAssetId}" which is not part of this bundle`
+        );
+      }
+      let finalDur = asset.durationSec && asset.durationSec > 0 ? asset.durationSec : 0;
+      if (!finalDur && asset.sourcePath) {
+        finalDur = await probeDurationSec(asset.sourcePath);
+      }
+      if (!finalDur) {
+        throw new Error(
+          `component:final-showcase asset "${asset.id}" has no resolvable duration (missing durationSec/sourcePath)`
+        );
+      }
+
+      // The showcase asset carries its own audio: never talk over it.
+      let audioExtracted = false;
+      if (finalShowcase.audio === 'source' && asset.sourcePath) {
+        if (await probeHasAudioStream(asset.sourcePath)) {
+          await extractAndResampleAudio({
+            videoPath: asset.sourcePath,
+            outAudioPath: segWavPath,
+            sampleRate,
+          });
+          audioExtracted = true;
+        }
+      }
+      if (!audioExtracted) {
+        await execFileAsync('ffmpeg', [
+          '-y',
+          '-f',
+          'lavfi',
+          '-i',
+          `anullsrc=r=${sampleRate}:cl=stereo`,
+          '-t',
+          finalDur.toFixed(3),
+          '-c:a',
+          'pcm_s16le',
+          segWavPath,
+        ]);
+      }
+      results[job.index] = { aDur: finalDur, partPath: segWavPath, words: [], chars: [] };
+      return;
+    }
+
+    params.onProgress?.(
+      `Synthesizing narration (TTS): clip ${job.clipIndex + 1}/${clips.length}, shot ${job.shotIndex + 1}/${clips[job.clipIndex].shots.length}, line ${job.lineIndex + 1}/${clips[job.clipIndex].shots[job.shotIndex].elements.length}`
+    );
+
+    const segAudioPath = path.join(workDir, `${partName}.src.wav`);
+    const seg = await synthesizeNarrationSegment(
+      {
+        sceneId: `${clips[job.clipIndex].id}_${clips[job.clipIndex].shots[job.shotIndex].id}_${job.lineIndex}`,
+        text: job.text,
+        outAudioPath: segAudioPath,
+      },
+      { voice, rate, instruct: params.instruct, ttsUrl: params.ttsUrl, timeoutMs: params.ttsTimeoutMs }
+    );
+
+    // Convert line segment to PCM WAV for seamless concatenation.
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-i',
+      segAudioPath,
+      '-ar',
+      String(sampleRate),
+      '-ac',
+      '2',
+      segWavPath,
+    ]);
+
+    // Word/char timings are made absolute during the assembly pass (the cursor
+    // is only known there), so keep them relative for now.
+    results[job.index] = {
+      aDur: seg.durationSec,
+      partPath: segWavPath,
+      words: seg.words || [],
+      chars: [],
+    };
+  }
 
   try {
+    const workers = Array.from({ length: Math.min(concurrency, Math.max(1, jobs.length)) }, async () => {
+      for (;;) {
+        const index = cursor++;
+        if (index >= jobs.length) return;
+        await processJob(jobs[index]);
+        completed += 1;
+        if (completed === jobs.length) params.onProgress?.(`Narration synthesized: ${jobs.length} lines`);
+      }
+    });
+    await Promise.all(workers);
+
+    // 3. Assemble in order: title-safe silence → lines (+ line gaps) → shot gaps → clip tail.
+    const audioParts: string[] = [];
+    let currentCursor = 0;
+    const voiceClips: ExplainerVoiceClip[] = [];
+    const unmatchedPhrases: string[] = [];
+
     for (let ci = 0; ci < clips.length; ci += 1) {
       const clip = clips[ci];
       const clipStart = currentCursor;
 
-      // 1. Title Safe Silence (chapter card window)
-      const titleSilence = await makeSilence(OPUS_TIMING.TITLE_SAFE, `part-${String(partIndex++).padStart(4, '0')}-title-silence.wav`);
-      audioParts.push(titleSilence);
-      currentCursor += OPUS_TIMING.TITLE_SAFE;
+      audioParts.push(await makeSilence(titleSafe));
+      currentCursor += titleSafe;
 
       const voiceShots: ExplainerVoiceShot[] = [];
+      let shotStart = currentCursor;
 
       for (let si = 0; si < clip.shots.length; si += 1) {
+        shotStart = currentCursor;
         const shot = clip.shots[si];
-        const shotStart = currentCursor;
         const voiceLines: ExplainerVoiceLine[] = [];
-        let finalVideoHandledInShot = false;
 
         for (let li = 0; li < shot.elements.length; li += 1) {
-          const lineText = shot.narration[li] || (shot.elements[li][0] as string);
-          const visualRef = shot.elements[li][1];
-          const refId = typeof visualRef === 'string' ? visualRef : visualRef.assetId || visualRef.name || '';
-          const isFinalVideo = refId === 'final-ai-video';
+          const job = jobs.find(
+            (j) => j.clipIndex === ci && j.shotIndex === si && j.lineIndex === li
+          )!;
+          const result = results[job.index];
+          if (!result) throw new Error(`missing TTS result for ${clip.id}/${shot.id}/line ${li}`);
 
-          const segWavPath = path.join(workDir, `clip-${ci}-shot-${si}-line-${li}-resampled.wav`);
-          let aDur = 0;
-          const chars: Array<{ c: string; t: number }> = [];
-          let lineWords: ExplainerWord[] = [];
-
-          if (isFinalVideo) {
-            if (finalVideoHandledInShot) {
-              // The final AI video showcase is already active and playing for this shot.
-              // Do NOT duplicate the video duration or audio for secondary lines in the same shot!
-              aDur = 0;
-            } else {
-              finalVideoHandledInShot = true;
-              // 成片自带声音，成片展示期间绝不加教程 TTS 旁白覆盖成片！
-              const finalAsset = (params.assets || []).find((a) => a.id === 'final-ai-video');
-              let finalDur = finalAsset?.durationSec && finalAsset.durationSec > 0 ? finalAsset.durationSec : 0;
-              if (!finalDur && finalAsset?.sourcePath) {
-                try {
-                  finalDur = await probeDurationSec(finalAsset.sourcePath);
-                } catch {
-                  finalDur = 4;
-                }
-              }
-              if (!finalDur) finalDur = 4;
-              aDur = finalDur;
-
-              let audioExtracted = false;
-              if (finalAsset?.sourcePath) {
-                try {
-                  const hasAudio = await probeHasAudioStream(finalAsset.sourcePath);
-                  if (hasAudio) {
-                    await extractAndResampleAudio({
-                      videoPath: finalAsset.sourcePath,
-                      outAudioPath: segWavPath,
-                      sampleRate,
-                    });
-                    audioExtracted = true;
-                  }
-                } catch {
-                  audioExtracted = false;
-                }
-              }
-
-              if (!audioExtracted) {
-                await makeSilence(finalDur, path.basename(segWavPath));
-              }
-              audioParts.push(segWavPath);
-            }
-          } else {
-            const segAudioPath = path.join(workDir, `clip-${ci}-shot-${si}-line-${li}.wav`);
-            params.onProgress?.(`Synthesizing narration (TTS): clip ${ci + 1}/${clips.length}, shot ${si + 1}/${clip.shots.length}, line ${li + 1}/${shot.elements.length}`);
-            const seg = await synthesizeNarrationSegment(
-              {
-                sceneId: `${clip.id}_${shot.id}_${li}`,
-                text: lineText,
-                outAudioPath: segAudioPath,
-              },
-              { voice, rate, instruct: params.instruct, ttsUrl: params.ttsUrl, timeoutMs: params.ttsTimeoutMs }
-            );
-
-            // Convert line segment to PCM WAV for seamless concatenation
-            await execFileAsync('ffmpeg', [
-              '-y',
-              '-i',
-              segAudioPath,
-              '-ar',
-              String(sampleRate),
-              '-ac',
-              '2',
-              segWavPath,
-            ]);
-            audioParts.push(segWavPath);
-            aDur = seg.durationSec;
-
-            // Build token/char times for karaoke reveal directly from real local TTS timestamps
-            if (seg.words && seg.words.length > 0) {
-              lineWords = seg.words.map((w) => ({
-                word: w.word,
-                t0: round(currentCursor + w.t0),
-                t1: round(currentCursor + w.t1),
-              }));
-              for (const w of seg.words) {
-                chars.push({ c: w.word, t: round(currentCursor + w.t0) });
-              }
-            } else {
-              const textChars = Array.from(lineText);
-              const charStep = textChars.length > 0 ? aDur / textChars.length : 0.05;
-              textChars.forEach((c, idx) => {
-                chars.push({ c, t: round(currentCursor + idx * charStep) });
-              });
-            }
-          }
+          // Secondary lines of a showcase shot are visual-only: the asset's own
+          // audio already covers the shot, so they add no duration.
+          const isShowcase = Boolean(job.sourceAssetId);
+          const duplicatedShowcase = isShowcase && voiceLines.some((l) => l.aDur > 0 && l.icon === job.refId);
+          const aDur = duplicatedShowcase ? 0 : result.aDur;
 
           const aStart = currentCursor;
-          currentCursor += aDur;
+          if (aDur > 0) {
+            audioParts.push(result.partPath);
+            currentCursor += aDur;
+          }
+
+          const words: ExplainerWord[] = result.words.map((w) => ({
+            word: w.word,
+            t0: round(aStart + w.t0),
+            t1: round(aStart + w.t1),
+          }));
+          const chars: Array<{ c: string; t: number }> =
+            words.length > 0
+              ? words.map((w) => ({ c: w.word, t: w.t0 }))
+              : Array.from(job.text).map((c, idx) => ({
+                  c,
+                  t: round(aStart + (aDur > 0 ? (idx * aDur) / Math.max(1, job.text.length) : 0)),
+                }));
+
+          // When does the voice actually say the on-screen phrase? The player
+          // reveals the element `style.timing.phraseLead` seconds before pStart.
+          const phraseTiming = locatePhraseTiming({
+            text: job.text,
+            phrase: job.phrase,
+            aStart,
+            aDur,
+            words,
+          });
+          if (!phraseTiming.matched && aDur > 0 && !isShowcase) {
+            unmatchedPhrases.push(`${clip.id}/${shot.id}#${li + 1} "${job.phrase}"`);
+          }
 
           voiceLines.push({
-            text: isFinalVideo ? (lineText || 'Final AI Video Showcase') : lineText,
-            icon: refId,
+            text: job.text,
+            icon: job.refId,
             aStart: round(aStart),
             aDur: round(aDur),
             chars,
-            words: lineWords,
+            words,
+            phrase: job.phrase,
+            pStart: phraseTiming.pStart,
+            pEnd: phraseTiming.pEnd,
           });
 
-          // Line gap breathing space
           if (li < shot.elements.length - 1 && aDur > 0) {
-            const lineGap = await makeSilence(OPUS_TIMING.LINE_GAP, `part-${String(partIndex++).padStart(4, '0')}-linegap.wav`);
-            audioParts.push(lineGap);
-            currentCursor += OPUS_TIMING.LINE_GAP;
+            audioParts.push(await makeSilence(timing.lineGap));
+            currentCursor += timing.lineGap;
           }
         }
 
-        // Shot gap breathing space
         if (si < clip.shots.length - 1) {
-          const shotGap = await makeSilence(OPUS_TIMING.SHOT_GAP, `part-${String(partIndex++).padStart(4, '0')}-shotgap.wav`);
-          audioParts.push(shotGap);
-          currentCursor += OPUS_TIMING.SHOT_GAP;
+          audioParts.push(await makeSilence(timing.shotGap));
+          currentCursor += timing.shotGap;
         }
-
-        const shotDur = currentCursor - shotStart;
-        shot.vStart = round(shotStart);
-        shot.vDur = round(shotDur);
-        shot.vLines = voiceLines;
 
         voiceShots.push({
           start: round(shotStart),
-          dur: round(shotDur),
+          dur: round(currentCursor - shotStart),
           lines: voiceLines,
         });
       }
 
-      // Clip tail silence
-      const tailSilence = await makeSilence(OPUS_TIMING.CLIP_TAIL, `part-${String(partIndex++).padStart(4, '0')}-tail-silence.wav`);
-      audioParts.push(tailSilence);
-      currentCursor += OPUS_TIMING.CLIP_TAIL;
-
-      const clipDur = currentCursor - clipStart;
-      clip.vStart = round(clipStart);
-      clip.vDur = round(clipDur);
+      audioParts.push(await makeSilence(timing.clipTail));
+      currentCursor += timing.clipTail;
 
       voiceClips.push({
         start: round(clipStart),
-        dur: round(clipDur),
+        dur: round(currentCursor - clipStart),
         shots: voiceShots,
       });
     }
 
     const totalDurationSec = round(currentCursor);
+    if (unmatchedPhrases.length > 0) {
+      params.onProgress?.(
+        `Warning: ${unmatchedPhrases.length} phrase(s) are not excerpts of their narration; they reveal at sentence start: ${unmatchedPhrases.slice(0, 5).join(', ')}${unmatchedPhrases.length > 5 ? ', …' : ''}`
+      );
+    }
 
-    // Concatenate all parts
     const concatList = path.join(workDir, 'concat-all.txt');
     await fs.writeFile(
       concatList,
@@ -1130,10 +1293,10 @@ export async function buildOpusVoiceTrack(params: {
     const voiceData: ExplainerVoiceData = {
       voice,
       total: totalDurationSec,
-      titleSafe: OPUS_TIMING.TITLE_SAFE,
-      clipTail: OPUS_TIMING.CLIP_TAIL,
-      lineGap: OPUS_TIMING.LINE_GAP,
-      shotGap: OPUS_TIMING.SHOT_GAP,
+      titleSafe,
+      clipTail: timing.clipTail,
+      lineGap: timing.lineGap,
+      shotGap: timing.shotGap,
       clips: voiceClips,
     };
 

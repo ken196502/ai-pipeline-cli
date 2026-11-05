@@ -140,7 +140,7 @@ export function buildTransitionNote(
     );
   }
   return (
-    `Cut (切分镜): ${opts.isFirst ? 'Opening establishing shot (开场建立镜头)' : `Transitions from previous shot${opts.previousTitle ? ` (${opts.previousTitle})` : ''} to a new scene`}` +
-    `${opts.title ? ` (${opts.title})` : ''}; framing, angle, and composition change while characters, palette, and style remain consistent.${suffix}`
+    `Cut (切分镜): ${opts.isFirst ? 'Opening establishing shot (开场建立镜头)' : `Cuts from previous shot${opts.previousTitle ? ` (${opts.previousTitle})` : ''}`}` +
+    `${opts.title ? ` (${opts.title})` : ''}; new framing (shot size, angle or focus subject may change freely) within the planned scene — characters, wardrobe, props, set layout, lighting and style stay consistent.${suffix}`
   );
 }

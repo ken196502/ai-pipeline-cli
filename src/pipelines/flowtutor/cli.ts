@@ -87,6 +87,8 @@ export function attachFlowTutorOptions(cmd: Command): Command {
     .option('--tutorial-size <resolution>', 'Tutorial video resolution as WIDTHxHEIGHT', '1920x1080')
     .option('--max-tutorial-scenes <n>', 'Maximum number of tutorial storyboard scenes', (v) => parseInt(v, 10), 10)
     .option('--tutorial-subtitles', 'Enable narration subtitles / captions in the tutorial video (default: off)', false)
+    .option('--tutorial-style <path|preset:name>', 'Tutorial video style document (theme/timing/components/transitions/post) — JSON path or preset:ember-dark|cyan-tech|apple-clean')
+    .option('--tutorial-transition <name>', 'Force one clip transition shader for the tutorial video (directionalWarp, lumaGlitch, radialBloom, crossZoom, dreamyZoom, displacement, emberBurn)')
     .option('--narration-lang <code>', 'Tutorial narration language code (defaults to --language)')
     .option('--dry-run', 'Perform pipeline dry run without spending Google Flow generation credits', false)
     .option('--skip-flow-gen', 'Skip Google Flow video generation stage', false)
@@ -216,6 +218,8 @@ export async function handleFlowTutorCommand(queryArg: string | undefined, opts:
     tutorialSize: tutorialSize || undefined,
     maxTutorialScenes: opts.maxTutorialScenes,
     tutorialSubtitles: Boolean(opts.tutorialSubtitles),
+    tutorialStyle: opts.tutorialStyle,
+    tutorialTransition: opts.tutorialTransition,
     narrationLang: opts.narrationLang,
     headed: opts.headed,
     viewport: parsedViewport,

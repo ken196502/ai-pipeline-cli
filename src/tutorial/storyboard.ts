@@ -23,6 +23,7 @@ import {
   type TutorialAsset,
   type TutorialStoryboard,
 } from './contracts.js';
+import { collectPhraseExcerptErrors } from '../libs/player/phrase.js';
 
 export interface StoryboardGenerationParams {
   runId: string;
@@ -55,9 +56,9 @@ function buildSystemPrompt(): string {
     'You design AI tutorial videos (解说视频) that teach viewers step-by-step how a viral AI video was made.',
     'The tutorial is rendered using a modern procedural canvas video engine (OpusVideo) featuring:',
     '  - Chapters (clips) with big whip zoom transitions, background flood wipes, and title cards',
-    '  - Shots with 2D affine camera interpolation',
+    '  - Shots with subtle style-driven camera drift',
     '  - Dual-column content:',
-    '    * Left column: stacked punchy takeaway phrases with adaptive typography, number rail, and karaoke pop reveals',
+    '    * Left column: stacked takeaway phrases (each one a verbatim excerpt of its narration sentence)',
     '    * Right column: dynamic visual card (AI-generated video clips, keyframe images, browser step screenshots, lucide icons, or data charts)',
     '',
     'Produce ONE valid JSON object (no markdown, no extra explanation) with this structure:',
@@ -81,16 +82,15 @@ function buildSystemPrompt(): string {
     '        {',
     '          "id": "c0_s1",',
     '          "elements": [',
-    '            ["Punchy phrase 1 (3-12 words)", "clip-001-video"],',
-    '            ["Punchy phrase 2 (3-12 words)", "clip-001-image"],',
-    '            ["Punchy phrase 3 (3-12 words)", "code"]',
+    '            ["verbatim excerpt of narration 1", "clip-001-video"],',
+    '            ["verbatim excerpt of narration 2", "clip-001-image"],',
+    '            ["verbatim excerpt of narration 3", "code"]',
     '          ],',
     '          "narration": [',
     '            "Full natural spoken narration sentence for line 1...",',
     '            "Full natural spoken narration sentence for line 2...",',
     '            "Full natural spoken narration sentence for line 3..."',
-    '          ],',
-    '          "camera": { "zoom": 1.0, "x": 0, "y": 0, "roll": 0 }',
+    '          ]',
     '        }',
     '      ]',
     '    }',
@@ -115,14 +115,17 @@ function buildSystemPrompt(): string {
     '   - "kicker": chapter index tag (e.g. "00 · OVERVIEW", "01 · STEP 1", "02 · STEP 2").',
     '   - "shots": 1 to 4 shots per clip.',
     '   - "elements": an array of 2 to 4 entries [phraseText, visualRef].',
-    '     * phraseText: a punchy, concise takeaway phrase (3-12 words in English) that will be displayed on the left column.',
+    '     * phraseText: a 3-8 word excerpt copied VERBATIM from its paired narration sentence (narration[i] for elements[i]): same words, same order, contiguous. Write the sentence first, then cut the phrase out of it. The player reveals each element exactly when the voice speaks that phrase, so a paraphrased phrase breaks the sync and is rejected.',
+    '       GOOD: narration "The first image prompt uses a medium shot to frame the monkey discovery." -> phrase "a medium shot to frame the monkey"',
+    '       BAD: phrase "Medium shot frames monkey discovery" (re-worded, not in the narration)',
     '     * visualRef: what to show on the right column. Must be:',
     '       - A material id from "materials" (kind "video" or "image", e.g. "clip-001-video", "clip-001-image", "browser-step-001", "channel-avatar")',
     '       - A prompt material id (kind "prompt", e.g. "clip-001-image-prompt", "clip-001-video-prompt") — rendered as an auto-scrolling terminal-style prompt card. Use it whenever you explain that clip\'s image prompt or motion prompt so viewers see the ACTUAL prompt text.',
     '       - An icon name from "icons" (e.g. "film", "sparkles", "code", "shapes", "camera", "monitor")',
     '       - A chart type ("bars", "line", "donut")',
     '   - "narration": an array of spoken sentences matching the "elements" array 1:1. Each narration sentence is spoken aloud via TTS when the corresponding phrase pops on screen!',
-    '   - "camera": optional 2D camera settings { "zoom": number (0.9 - 1.2), "x": number (-40 to 40), "y": number (-30 to 30), "roll": number (-0.05 to 0.05) }.',
+    '   - Do NOT emit colours, fonts, durations, camera motion or transitions: the visual style is configured separately in style.json. Only describe content (phrases, visualRefs, narration).',
+    '   - Do NOT describe layouts, title-card designs, typography or animations: the player chooses and varies them automatically.',
     '',
     '2. Visual Material Usage & Coverage:',
     '   - EVERY generated video material (kind "video", e.g. "clip-001-video") in "materials" MUST be referenced in at least one shot elements visualRef! The tutorial showcases the actual generated video clips.',
@@ -133,8 +136,8 @@ function buildSystemPrompt(): string {
     '   - When "found" is false or "missingNumbers" is true: NEVER list specific numbers (no follower counts, no exact view/like counts) — omit popularity and financial claims entirely.',
     '   - Distribute materials evenly; never repeat one material everywhere while others remain unused.',
     '   - Prompt coverage: every clip that carries prompt materials (e.g. "clip-001-image-prompt" / "clip-001-video-prompt") MUST reference at least one of its prompt materials in a shot element when you explain how that clip was prompted — the tutorial must actually display the generation prompts (auto-scrolling prompt cards).',
-    '   - MANDATORY FINAL CHAPTER (Final AI Video Showcase): The tutorial MUST conclude with a final showcase chapter (e.g. title: "Final AI Video Showcase", kicker: "FINAL · AI SHOWCASE"). In the final clip\'s shot, you MUST reference the final video asset ("final-ai-video", or the generated AI video) in its elements visualRef so that the complete voiced AI video is played and showcased at the end of the tutorial!',
-    '     * CRITICAL AUDIO & VISUAL RULE FOR FINAL SHOWCASE: The final AI video ("final-ai-video") ALREADY CONTAINS COMPLETE VOICE AND AUDIO! Therefore, NEVER generate voiceover narration that talks over the final video. In the final showcase shot, keep narration empty or minimal, and do NOT add decorative lucide icons that would displace or overwrite the final video display!',
+    '   - MANDATORY FINAL CHAPTER (Final AI Video Showcase): The tutorial MUST conclude with a final showcase chapter (e.g. title: "Final AI Video Showcase", kicker: "FINAL · AI SHOWCASE"). In the final clip\'s shot, you MUST reference the showcase component "component:final-showcase" in its elements visualRef so that the complete voiced AI video is played and showcased at the end of the tutorial (style.json declares which asset it plays)!',
+    '     * CRITICAL AUDIO & VISUAL RULE FOR FINAL SHOWCASE: The final AI video ALREADY CONTAINS COMPLETE VOICE AND AUDIO! Therefore, NEVER generate voiceover narration that talks over the final video. In the final showcase shot, keep narration to a single short line, and do NOT add decorative lucide icons that would displace or overwrite the final video display!',
     '',
     '3. Display Copy Rules:',
     '   - Arrow chains (->, =>, →) are strictly BANNED from all display copy. Each phrase must be a stand-alone punchy statement.',
@@ -242,6 +245,9 @@ export async function generateTutorialStoryboard(
         responseFormat: 'json_object',
         timeoutMs: 300_000,
         context: { stage: 'tutorial-gen', task: 'storyboard' },
+        // Thinking off: the storyboard is a structured selection/assembly task over the
+        // material list; the reasoning stream only added minutes of latency.
+        thinking: false,
       },
       config
     );
@@ -270,7 +276,8 @@ export async function generateTutorialStoryboard(
       const coverageErrors = collectStoryboardCoverageErrors(storyboard, params.assets);
       const displayErrors = collectStoryboardDisplayErrors(storyboard);
       const refErrors = collectStoryboardRefErrors(storyboard, params.assets);
-      const allValidationErrors = [...coverageErrors, ...displayErrors, ...refErrors];
+      const phraseErrors = collectPhraseExcerptErrors(storyboard);
+      const allValidationErrors = [...coverageErrors, ...displayErrors, ...refErrors, ...phraseErrors];
 
       if (allValidationErrors.length > 0) {
         throw new LLMError({

@@ -39,6 +39,7 @@ import {
   withRiskControlRetry,
 } from '../dom.js';
 import { resolveMediaKey } from '../duplicate-guard.js';
+import { MediaIdentityLedger } from '../media-ledger.js';
 import { animateClipImage } from './clip-animate.js';
 import { generateFramesVideo } from './clip-frames.js';
 import { generateClipImage } from './clip-image.js';
@@ -59,6 +60,10 @@ export async function generateVideo(
     : options.prompt.trim();
 
   if (options.endImagePrompt?.trim()) {
+    // Single-clip runs still need the identity ledger: the end-image call must exclude
+    // the start image it just generated (and anything else this call already consumed).
+    const mediaLedger = await MediaIdentityLedger.seedFromScriptClips([]);
+
     console.log(pc.cyan(`\n[flow-cli] Step 1/3: Generating Start keyframe image...`));
     const startImage = await generateClipImage(ctx, {
       label: 'clip-start',
@@ -71,7 +76,11 @@ export async function generateVideo(
       profileDir: options.profileDir,
       dataDir: options.dataDir,
       referencePreviousImage: false,
+      excludeKeys: mediaLedger.snapshot(),
     });
+    mediaLedger.add('clip-start', [startImage.mediaKey, startImage.imageUrl, startImage.imageOutputPath]);
+    const startImageIdentity = await resolveMediaKey(startImage.imageUrl, startImage.imageOutputPath, startImage.mediaKey);
+    mediaLedger.add('clip-start', [startImageIdentity]);
 
     console.log(pc.cyan(`\n[flow-cli] Step 2/3: Generating End keyframe image...`));
     const endImage = await generateClipImage(ctx, {
@@ -87,8 +96,14 @@ export async function generateVideo(
       referencePreviousImage: true,
       referenceKey: startImage.mediaKey,
       referenceSrc: startImage.imageUrl ?? null,
-      excludeKeys: [startImage.mediaKey, startImage.imageUrl, startImage.mediaId],
+      excludeKeys: [
+        ...mediaLedger.snapshot(),
+        startImage.mediaKey,
+        startImage.imageUrl,
+        startImage.mediaId,
+      ],
     });
+    mediaLedger.add('clip-end', [endImage.mediaKey, endImage.imageUrl, endImage.imageOutputPath]);
 
     console.log(pc.cyan(`\n[flow-cli] Step 3/3: Generating Frames video (NO right-click animate)...`));
     const video = await generateFramesVideo(ctx, {
@@ -291,6 +306,7 @@ export async function generateImage(
 
       // Submit generation request (Enter first, click fallback)
       console.log(pc.cyan(`[flow-cli] Submitting image generation request via Enter...`));
+      const imgSubmittedAt = Date.now();
       const imgSubmitVia = await submitPrompt(page);
       console.log(pc.gray(`[flow-cli] Image prompt submitted via ${imgSubmitVia}`));
       await captureEvidence(page, 'img-02-generate-clicked', ctx.config.debugDir);
@@ -307,7 +323,9 @@ export async function generateImage(
       await captureEvidence(page, 'img-03-generation-queued', ctx.config.debugDir);
 
       // Wait for new image tile to appear in the project grid
-      const newTile = await waitForNewImageTile(page, baselineTileCount, options.timeoutMs, failureBaseline);
+      const newTile = await waitForNewImageTile(page, baselineTileCount, options.timeoutMs, failureBaseline, {
+        submittedAt: imgSubmittedAt,
+      });
       console.log(pc.green(`✓ New image tile detected in project grid.`));
       await captureEvidence(page, 'img-04-image-ready', ctx.config.debugDir);
 

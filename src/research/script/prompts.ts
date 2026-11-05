@@ -918,6 +918,11 @@ export interface ReorchestrationPromptOptions {
   modelTarget?: string;
   clipTransitions?: Array<'cut' | 'continuous'>;
   visualStyle?: string;
+  /**
+   * Pre-rendered authoritative shot plan (from ./story-plan.ts). Passed as a plain
+   * string so this module stays free of the story-plan import cycle.
+   */
+  storyPlanBlock?: string;
 }
 
 /**
@@ -983,11 +988,22 @@ ${SCALE_AND_PROPORTION_GUIDELINES}
    - If the extracted prompts contain both image and video prompts, synthesize their aesthetics and motion.
    - If the extracted prompts are video prompts only, deduce the frozen starting composition into imagePrompt and adapt motion into visualPrompt.
    - If the extracted prompts are image prompts only, adapt the composition into imagePrompt and design dynamic camera and character motion into visualPrompt.${styleInstruction}
-5. STRICT ENGLISH LANGUAGE REQUIREMENT:
+
+5. SCENE CONTINUITY & SHOT COVERAGE (同一场景，不同切镜) — MANDATORY:
+   - A scene is covered by several shots. Inside one scene, switching between wide, medium and close-up shots on different subjects (one character, another character's reaction, a key prop, the group) is normal film language.
+   - The start frame (imagePrompt) and end frame (endImagePrompt) of one clip may differ a lot in shot size, angle and focus subject, as long as both are clearly the SAME scene.
+   - What must NOT drift within a scene: set layout and landmarks, wardrobe, props and their current state, lighting/time of day, and where each character is. Characters move only as the blocking says, and keep their screen side unless the blocking moves them.
+   - Do not move the story to a new location unless the plan starts a new scene.
+   - STATE CONTINUITY: whatever happened by the end of a clip (dropped prop, mud splash, opened door, a character who walked to the tree) is the physical starting state of the next clip in the same scene.
+   - STORY CAUSALITY: every clip advances the scene (action, reaction or reveal) and follows from the previous clip's outcome.
+   - STATE THE FRAMING EXPLICITLY: imagePrompt and endImagePrompt each state shot size, camera angle, focus subject and where each visible character is in the frame and in the set.
+   - Output the planned scene in "locationId" and the planned camera in "cameraSetup".
+
+6. STRICT ENGLISH LANGUAGE REQUIREMENT:
    - All generated clip fields — title, imagePrompt, endImagePrompt, visualPrompt, cameraMovement, subjectAction, environmentLighting, styleAesthetic, and narrationCues — MUST be written 100% strictly in clean ENGLISH.
    - NEVER output Chinese characters (汉字) in any field. The voiceover TTS engine requires pure English voiceover.
 
-6. CONCISE REASONING & OUTPUT:
+7. CONCISE REASONING & OUTPUT:
    - Keep thinking focused and brief. Do not engage in endless circular analysis.
    - Your final answer MUST be the valid JSON structure specified below. Output the JSON object directly.
 
@@ -1008,6 +1024,8 @@ Return a structured JSON response matching this exact shape:
     {
       "clipIndex": 1,
       "sceneId": "scene-001",
+      "locationId": "scene-001 (the planned scene this clip covers)",
+      "cameraSetup": "planned camera: shot size + angle + height + lens + camera position + move",
       "title": "Short descriptive scene title",
       "hasNarration": "y | n",
       "startSec": 0,
@@ -1043,13 +1061,15 @@ export function buildReorchestrationUserPrompt(options: ReorchestrationPromptOpt
         .map((t, idx) => {
           const num = idx + 1;
           if (t === 'cut') {
-            return `- Clip ${num} (New scene): Provide "imagePrompt" (start frame at 0.0s), "endImagePrompt" (end frame at ${options.clipDuration}s), and "visualPrompt" (motion between start and end).`;
+            return `- Clip ${num} (New shot / 切分镜 — ${num > 1 ? 'new framing of the planned scene' : 'opening shot'}): provide "imagePrompt" (start frame at 0.0s), "endImagePrompt" (end frame at ${options.clipDuration}s) and "visualPrompt" (motion between them).`;
           }
           return `- Clip ${num} (Action continuation): Action resumes from previous video; provide ONLY "visualPrompt" (motion and camera dynamics). Set "imagePrompt" and "endImagePrompt" to empty string "".`;
         })
         .join('\n') +
       '\n'
     : '';
+
+  const storyPlanBlock = options.storyPlanBlock ? `\n${options.storyPlanBlock}\n` : '';
 
   return `Topic: "${options.topic}"
 Reference Video: "${options.videoTitle}"
@@ -1063,16 +1083,18 @@ Found ${options.vlPrompts.length} extracted prompt(s) (strictly classified as "i
 - ${videoPrompts.length} Video generation prompt(s) (type: video)
 
 ${formattedSources}
-${clipSpecs}
+${clipSpecs}${storyPlanBlock}
 === RE-ORCHESTRATION ASSIGNMENT ===
 You must take the extracted prompts above and RE-ORCHESTRATE (重新编排) them into exactly ${options.targetClipCount} sequential story clips.
-Each clip must include:
+${options.storyPlanBlock ? `AUTHORITATIVE SHOT PLAN IS PROVIDED ABOVE: translate it shot-by-shot. Clip N must use shot N's scene, beat, camera, start frame, end frame, blocking and blocking change, action, acting and spoken lines. Do NOT invent new scenes, do NOT reorder shots, and do NOT change what the plan puts on screen.
+` : ''}Each clip must include:
 1. **imagePrompt (STARTING FRAME at 0.0s)**: Static Text-to-Image prompt for the OPENING frame of this clip at t=0.0s. For action continuation clips, leave as empty string "".
-2. **endImagePrompt (ENDING FRAME at duration)**: Static Text-to-Image prompt for the CONCLUDING frame of this clip at t=duration. For action continuation clips, leave as empty string "". The ending frame must be a self-contained visual description showing CLEAR, NOTICEABLE VISUAL PROGRESSION from imagePrompt (action concluded, character arrived at position, angle/camera progressed, new focal subject). Do NOT start with "Same wide shot" or provide an almost identical scene.
+2. **endImagePrompt (ENDING FRAME at duration)**: Static Text-to-Image prompt for the CONCLUDING frame of this clip at t=duration. For action continuation clips, leave as empty string "". The ending frame shows where the action has got to (end pose, new positions) in the SAME scene; its shot size, angle and focus subject may differ from the start frame. Do NOT start with "Same wide shot" or provide an almost identical scene.
 3. **visualPrompt (Motion Dynamics)**: Companion animation prompt describing ONLY camera dynamics and subject motion. DO NOT write transition meta-words into this prompt.
 
 Mandatory Constraints:
 - In-universe creative story ONLY: Base the world, characters, setting, and plot SOLELY on the fictional universe described in the EXTRACTED SOURCE PROMPTS. NEVER create scenes depicting tutorials, computers, laptops, desks, editing software, or content creators.
+- SAME SCENE, DIFFERENT SHOTS (同一场景，不同切镜): within a scene, wide / medium / close-ups on different subjects are all fine, and start and end frames may differ a lot. Set layout, wardrobe, props, lighting and character positions stay consistent; never invent a location the plan does not have.
 - Opening-Frame Rule: For new scene clips, "imagePrompt" is strictly the STARTING FRAME (0.0s before action unfolds). "endImagePrompt" is the ending settled pose.
 - Pure Video Prompt: "visualPrompt" describes ONLY what moves on screen. Never write transition directives or continuation commentary in visualPrompt.
 - Strict Narration/Dialogue rule: narrationCues is strictly for spoken voiceover or spoken dialogue that will be spoken aloud by a voice actor. Set "hasNarration" to "y" if the video has spoken voiceover/dialogue; set to "n" if this video is non-verbal (pure visual, background music/ambience only). For each clip, set "hasNarration" to "y" or "n". When "hasNarration" is "n", narrationCues MUST be empty "". Strictly NEVER output "No dialogue", "No dialog", "None", "N/A", "Mood cue:", or sound effect descriptions.
@@ -1085,7 +1107,8 @@ Mandatory Constraints:
 - MASTER CHARACTER & SCENE SCALE CONSISTENCY: In the top-level "characters" field, define each character's immutable appearance AND ABSOLUTE SIZE once (e.g. {"character1": "1.8 m tall athletic build, detailed fixed appearance, age, gender, ethnicity, facial features, hair, eye color, and exact clothing from head to toe"}). In the top-level "backgrounds" field, define each recurring location/set once with its ABSOLUTE DIMENSIONS and fixed scale landmarks in the same unit (e.g. {"background1": "30 m ceiling, 2.4 m tall doors, 0.6 m x 0.4 m tabletop model with 5 cm puppets"}). In all imagePrompt, endImagePrompt, and visualPrompt entries, refer to the character strictly as "{character1}" and to the location strictly as "{background1}" to ensure 100% identical appearance, wardrobe AND human-to-set scale ratio across all clips. NEVER restate or alter a master size inside a clip prompt; express shot-size changes through framing only.
 - STRICT ENGLISH LANGUAGE PURITY: All generated content — titles, imagePrompt, endImagePrompt, visualPrompt, and narrationCues — MUST be written strictly in clean English. Do NOT output any Chinese characters anywhere.
 - Preserve the visual aesthetic, lighting, and characters from the source prompts.
-- Output exactly ${options.targetClipCount} clips in the JSON "clips" array.`;
+${options.storyPlanBlock ? `- ECHO THE PLAN: "locationId" is the planned sceneId and "cameraSetup" restates the planned camera. narrationCues is the planned narrationLine (empty when the shot has no lines). When a character speaks on screen, visualPrompt describes who is speaking and how (mouth movement, gesture) without quoting the line. Reuse the plan's master character/background placeholder keys EXACTLY as given — do not rename them and do not redefine their absolute size.
+` : ''}- Output exactly ${options.targetClipCount} clips in the JSON "clips" array.`;
 }
 
 // Dynamic genre detection for tests/verification

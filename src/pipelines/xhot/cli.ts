@@ -41,6 +41,8 @@ export function attachXHotOptions(cmd: Command): Command {
     .option('--explainer-engine <engine>', 'Explainer video render engine (chromium, firefox)', 'chromium')
     .option('--explainer-fps <n>', 'Frame rate of explainer video', (v) => parseInt(v, 10), 30)
     .option('--explainer-subtitles', 'Enable narration subtitles / captions', false)
+    .option('--explainer-style <path|preset:name>', 'Explainer video style document (theme/timing/components/transitions/post) — JSON path or preset:ember-dark|cyan-tech|apple-clean')
+    .option('--explainer-transition <name>', 'Force one clip transition shader (directionalWarp, lumaGlitch, radialBloom, crossZoom, dreamyZoom, displacement, emberBurn)')
     .option('--tutorial-engine <engine>', 'Legacy alias for --explainer-engine')
     .option('--tutorial-fps <n>', 'Legacy alias for --explainer-fps', (v) => parseInt(v, 10))
     .option('--tutorial-subtitles', 'Legacy alias for --explainer-subtitles')
@@ -204,6 +206,8 @@ export async function handleXHotCommand(queryArg?: string, opts: any = {}): Prom
     explainerEngine: opts.explainerEngine || opts.tutorialEngine || 'chromium',
     explainerFps: opts.explainerFps ?? opts.tutorialFps ?? 30,
     explainerSubtitles: Boolean(opts.explainerSubtitles || opts.tutorialSubtitles),
+    explainerStyle: opts.explainerStyle,
+    explainerTransition: opts.explainerTransition,
     ttsVoice: opts.ttsVoice,
     ttsRate: opts.ttsRate || '+0%',
     dryRun: Boolean(opts.dryRun),

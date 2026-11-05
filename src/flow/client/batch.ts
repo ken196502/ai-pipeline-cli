@@ -2,7 +2,7 @@
  * Batch video generation pipeline for FlowClient.
  * Orchestrates alternating clip generation (image -> video per clip, or last-frame continuation).
  */
-import { readFile, stat as fsStat, writeFile } from 'node:fs/promises';
+import { readFile, stat as fsStat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import pc from 'picocolors';
 import type { RunContext } from '../../run/index.js';
@@ -15,11 +15,32 @@ import {
 } from '../contracts.js';
 import { planClipGeneration } from '../clip-plan.js';
 import { ClipDuplicateGuard, hashMediaFile, resolveMediaKey } from '../duplicate-guard.js';
+import { MediaIdentityLedger, findCrossClipDuplicateKeyframes } from '../media-ledger.js';
 import { paceByGenerationProgress } from './project.js';
 import { generateClipImage } from './clip-image.js';
 import { generateContinuationVideo } from './clip-continuation.js';
 import { generateFramesVideo } from './clip-frames.js';
 import type { ClientContext } from './types.js';
+
+/**
+ * Content-level backstop for the identity ledger: a freshly downloaded keyframe whose
+ * bytes already exist in this run means the canvas handed back old media — fail loudly
+ * instead of silently stitching a duplicate frame into the video.
+ */
+async function assertFreshKeyframe(
+  ledger: MediaIdentityLedger,
+  owner: string,
+  filePath: string | null | undefined
+): Promise<void> {
+  const duplicateOf = await ledger.registerKeyframe(owner, filePath ?? null);
+  // Same-owner repeat = this clip's own already-downloaded file (exactly-once download
+  // skipped a re-fetch); that is legitimate reuse, not stale media from another clip.
+  if (duplicateOf && duplicateOf !== owner) {
+    throw new Error(
+      `${owner} keyframe is byte-identical to ${duplicateOf} — the Flow canvas returned previously generated media instead of a new image`
+    );
+  }
+}
 
 export async function batchGenerate(
   ctx: ClientContext,
@@ -61,6 +82,71 @@ export async function batchGenerate(
 
   if (!Array.isArray(script.clips) || script.clips.length === 0) {
     throw new Error(`Invalid or empty flow script file: ${scriptPath}`);
+  }
+
+  const persistScript = async () => {
+    if (run) await run.write('script', FlowVideoScriptSchema.parse(script));
+    else await writeFile(scriptPath, JSON.stringify(script, null, 2) + '\n', 'utf8');
+  };
+
+  // ── Repair scripts written before the media-identity fix ──
+  // A clip that recorded ANOTHER clip's keyframe (observed: clip-006 == clip-005) would
+  // otherwise be "reused" by the hasStartImage/hasEndImage fast path AND its already
+  // rendered video would be kept by the exactly-once download. Clear the recorded
+  // identity, delete the stale files and re-queue the clip so it is genuinely rebuilt.
+  const duplicateKeyframes = findCrossClipDuplicateKeyframes(script.clips);
+  if (duplicateKeyframes.length > 0) {
+    const repairedClips = new Set<number>();
+    for (const finding of duplicateKeyframes) {
+      const clip = script.clips.find((c) => c.clipIndex === finding.clipIndex);
+      if (!clip) continue;
+      const owner = script.clips.find((c) => c.clipIndex === finding.ownerClipIndex);
+      const label = `clip-${String(clip.clipIndex).padStart(3, '0')}`;
+      const ownerLabel = `clip-${String(finding.ownerClipIndex).padStart(3, '0')}`;
+      const stalePath = finding.field === 'start' ? clip.localImagePath : clip.localEndImagePath;
+      const ownerPath = finding.field === 'start' ? owner?.localImagePath : owner?.localEndImagePath;
+
+      console.warn(
+        pc.yellow(
+          `[flow-cli] ⚠ ${label}: recorded ${finding.field} keyframe is the SAME media as ${ownerLabel} (${finding.identity}) — discarding it and regenerating this clip`
+        )
+      );
+
+      if (finding.field === 'start') {
+        delete clip.imageUrl;
+        delete clip.localImagePath;
+        clip.imageTileKey = null;
+      } else {
+        delete clip.endImageUrl;
+        delete clip.localEndImagePath;
+        clip.endImageTileKey = null;
+      }
+
+      // Never delete a file another clip still owns.
+      if (stalePath && path.resolve(stalePath) !== (ownerPath ? path.resolve(ownerPath) : null)) {
+        await unlink(path.resolve(stalePath)).catch(() => {});
+      }
+      repairedClips.add(clip.clipIndex);
+    }
+
+    // A clip built from the wrong keyframes produced a wrong video too: re-queue it and
+    // drop the stale MP4 so the exactly-once download cannot keep the bad render.
+    for (const clipIndex of repairedClips) {
+      const clip = script.clips.find((c) => c.clipIndex === clipIndex);
+      if (!clip) continue;
+      const label = `clip-${String(clipIndex).padStart(3, '0')}`;
+      if (clip.status === 'completed') {
+        console.warn(pc.yellow(`[flow-cli] ⚠ ${label}: previously marked completed from the discarded keyframes — re-queued for regeneration`));
+      }
+      clip.status = 'pending';
+      delete clip.videoUrl;
+      delete clip.localVideoPath;
+      delete clip.error;
+      const staleVideoPath = path.join(outDir, `${label}.mp4`);
+      await unlink(staleVideoPath).catch(() => {});
+    }
+
+    await persistScript();
   }
 
   const eligibleClips = script.clips.filter(
@@ -158,10 +244,12 @@ export async function batchGenerate(
   let latestCredits: number | undefined;
   let stepCounter = 0;
 
-  const persistScript = async () => {
-    if (run) await run.write('script', FlowVideoScriptSchema.parse(script));
-    else await writeFile(scriptPath, JSON.stringify(script, null, 2) + '\n', 'utf8');
-  };
+
+  // Run-level media identity ledger: every media the script already records (including
+  // clips completed by a previous session) is "consumed" and must never be returned as
+  // a freshly generated keyframe. See src/flow/media-ledger.ts for the root cause.
+  const mediaLedger = await MediaIdentityLedger.seedFromScriptClips(script.clips);
+  console.log(pc.gray(`Media identity ledger seeded with ${mediaLedger.snapshot().length} consumed identity token(s)`));
 
   // Inter-step pacing: driven by ACTUAL generation progress, not a fixed clock.
   const cooldown = async (label: string) => {
@@ -343,6 +431,7 @@ export async function batchGenerate(
         clip.status = 'completed';
         clip.videoUrl = video.videoUrl;
         clip.localVideoPath = video.outputPath ?? undefined;
+        mediaLedger.add(`${item.label} video`, [clip.videoUrl, clip.localVideoPath]);
         delete clip.error;
         await persistScript();
         results.push({
@@ -413,6 +502,8 @@ export async function batchGenerate(
           referenceKey: previousImageKey,
           referenceSrc: previousImageSrc,
           referenceMode: 'optional',
+          // Never accept ANY media this run already consumed as the "new" start frame.
+          excludeKeys: mediaLedger.snapshot(),
         });
 
         clip.imageUrl = startImg.imageUrl || undefined;
@@ -420,6 +511,8 @@ export async function batchGenerate(
         // Truthful identity: src UUID, else content hash of the downloaded file
         // (recycled tiles carry stale attribute keys; asb srcs carry no UUID).
         clip.imageTileKey = await resolveMediaKey(startImg.imageUrl, startImg.imageOutputPath, startImg.mediaKey);
+        await assertFreshKeyframe(mediaLedger, `${item.label} start`, clip.localImagePath);
+        mediaLedger.add(`${item.label} start`, [clip.imageTileKey, clip.imageUrl, clip.localImagePath]);
         delete clip.error;
         await persistScript();
         console.log(pc.green(`✓ ${item.label}: Start keyframe image ready`));
@@ -468,9 +561,15 @@ export async function batchGenerate(
           // the recorded URL lets the reference step still target the real card.
           referenceSrc: clip.imageUrl ?? null,
           referenceMode: 'optional',
-          // Explicitly exclude the start image so end-image generation never mistakes
-          // the start image card for the newly generated end image card.
-          excludeKeys: [clip.imageTileKey, clip.imageUrl, clip.localImagePath],
+          // Explicitly exclude the start image AND every media already consumed by the
+          // run, so end-image generation never mistakes an old card (e.g. the previous
+          // clip's start/end frame) for the newly generated end image.
+          excludeKeys: [
+            ...mediaLedger.snapshot(),
+            clip.imageTileKey ?? null,
+            clip.imageUrl ?? null,
+            clip.localImagePath ?? null,
+          ],
         });
 
         clip.endImageUrl = endImg.imageUrl || undefined;
@@ -478,6 +577,8 @@ export async function batchGenerate(
         // Truthful identity: src UUID, else content hash of the downloaded file
         // (recycled tiles carry stale attribute keys; asb srcs carry no UUID).
         clip.endImageTileKey = await resolveMediaKey(endImg.imageUrl, endImg.imageOutputPath, endImg.mediaKey);
+        await assertFreshKeyframe(mediaLedger, `${item.label} end`, clip.localEndImagePath);
+        mediaLedger.add(`${item.label} end`, [clip.endImageTileKey, clip.endImageUrl, clip.localEndImagePath]);
         delete clip.error;
         await persistScript();
         console.log(pc.green(`✓ ${item.label}: End keyframe image ready`));
@@ -638,6 +739,7 @@ export async function batchGenerate(
       clip.status = 'completed';
       clip.videoUrl = video.videoUrl;
       clip.localVideoPath = video.outputPath ?? undefined;
+      mediaLedger.add(`${item.label} video`, [clip.videoUrl, clip.localVideoPath]);
       delete clip.error;
       await persistScript();
       results.push({

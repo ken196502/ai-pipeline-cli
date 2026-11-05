@@ -46,9 +46,7 @@ import { chromium, firefox } from 'playwright-core';
 const execFileAsync = promisify(execFile);
 
 const EXPLAINER_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const TIMELINE_PATH = fs.existsSync(path.join(EXPLAINER_DIR, 'explainer.json'))
-  ? path.join(EXPLAINER_DIR, 'explainer.json')
-  : path.join(EXPLAINER_DIR, 'tutorial.json');
+const TIMELINE_PATH = path.join(EXPLAINER_DIR, 'explainer.json');
 const NARRATION_WAV_PATH = path.join(EXPLAINER_DIR, 'assets', 'narration.wav');
 const VIDEO_FILENAME = 'explainer-video.mp4';
 const SILENT_FILENAME = 'explainer-silent.mp4';
@@ -122,9 +120,7 @@ function parseCliArgs() {
 
 async function serveDirectory(dir) {
   const root = path.resolve(dir);
-  const defaultHtml = fs.existsSync(path.join(root, 'explainer-player.html'))
-    ? 'explainer-player.html'
-    : 'tutorial-player.html';
+  const defaultHtml = 'explainer-player.html';
 
   const server = http.createServer((req, res) => {
     const requestPath = decodeURIComponent((req.url || '/').split('?')[0]);
@@ -207,9 +203,7 @@ async function main() {
     throw new Error('narration track not found: ' + NARRATION_WAV_PATH);
   }
 
-  const defaultHtml = fs.existsSync(path.join(EXPLAINER_DIR, 'explainer-player.html'))
-    ? 'explainer-player.html'
-    : 'tutorial-player.html';
+  const defaultHtml = 'explainer-player.html';
 
   const totalFrames = Math.max(1, Math.round(totalDurationSec * fps));
   console.log('Timeline: ' + width + 'x' + height + ' @ ' + fps + 'fps, duration ' + totalDurationSec.toFixed(1) + 's (' + totalFrames + ' frames)');
@@ -256,12 +250,10 @@ async function main() {
   try {
     console.log('Booting explainer player in render mode...');
     await page.goto(server.origin + '/' + defaultHtml + '?render=1', { waitUntil: 'load', timeout: 120000 });
-    await page.waitForFunction(
-      'window.__explainerReady === true || window.__tutorialReady === true || window.__explainerError || window.__tutorialError',
-      undefined,
-      { timeout: 120000 }
-    );
-    const bootError = await page.evaluate('window.__explainerError || window.__tutorialError || null');
+    await page.waitForFunction('window.__explainerReady === true || window.__explainerError', undefined, {
+      timeout: 120000,
+    });
+    const bootError = await page.evaluate('window.__explainerError || null');
     if (bootError) throw new Error('explainer player failed to boot: ' + bootError);
 
     await page.evaluate(() => {
@@ -271,13 +263,21 @@ async function main() {
       document.getElementById('controls')?.remove();
     });
 
+    // Raw RGBA readback is ~30% faster per frame than PNG screenshots and skips
+    // PNG decode in ffmpeg. WebGL readPixels is bottom-up, so ffmpeg flips it.
+    const playerRenderer = await page.evaluate(() => (window.__explainer && window.__explainer.renderer) || 'canvas2d');
+    const needsFlip = playerRenderer !== 'canvas2d';
+    console.log('Player renderer: ' + playerRenderer);
+
     console.log('Starting ffmpeg frame capture pipe...');
     const ffmpegProc = spawn('ffmpeg', [
       '-y',
-      '-f', 'image2pipe',
-      '-framerate', String(fps),
+      '-f', 'rawvideo',
+      '-pix_fmt', 'rgba',
+      '-s', width + 'x' + height,
+      '-r', String(fps),
       '-i', 'pipe:0',
-      '-vf', 'setsar=1/1',
+      '-vf', needsFlip ? 'vflip,setsar=1/1' : 'setsar=1/1',
       '-aspect', '16:9',
       '-c:v', 'libx264',
       '-preset', opts.preset || 'medium',
@@ -298,12 +298,31 @@ async function main() {
     for (let frame = 0; frame < totalFrames; frame++) {
       const t = frame / fps;
       await page.evaluate((time) => {
-        const api = window.__explainer || window.__tutorial;
-        return api.seek(time);
+        return window.__explainer.seek(time);
       }, t);
-      const pngBuffer = await page.screenshot({ type: 'png' });
+      const frameB64 = await page.evaluate(() => {
+        const canvas = document.getElementById('stage');
+        const w = canvas.width;
+        const h = canvas.height;
+        const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+        let bytes;
+        if (gl) {
+          bytes = new Uint8Array(w * h * 4);
+          gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+        } else {
+          const ctx = canvas.getContext('2d');
+          bytes = new Uint8Array(ctx.getImageData(0, 0, w, h).data);
+        }
+        let binary = '';
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) {
+          binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
+        }
+        return btoa(binary);
+      });
+      const frameBuffer = Buffer.from(frameB64, 'base64');
       await new Promise((resolve, reject) => {
-        stdin.write(pngBuffer, (err) => (err ? reject(err) : resolve()));
+        stdin.write(frameBuffer, (err) => (err ? reject(err) : resolve()));
       });
       if ((frame + 1) % 100 === 0 || frame === totalFrames - 1) {
         const pct = (((frame + 1) / totalFrames) * 100).toFixed(1);
@@ -366,7 +385,7 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
   fail "ffmpeg not found in PATH — install ffmpeg (brew install ffmpeg) on this host machine"
 fi
 
-[ -f "\$EXPLAINER_DIR/explainer.json" ] || [ -f "\$EXPLAINER_DIR/tutorial.json" ] || fail "explainer.json not found here"
+[ -f "\$EXPLAINER_DIR/explainer.json" ] || fail "explainer.json not found here"
 [ -f "\$EXPLAINER_DIR/assets/narration.wav" ] || fail "assets/narration.wav not found"
 [ -f "\$EXPLAINER_DIR/host-render/render.mjs" ] || fail "host-render/render.mjs missing"
 

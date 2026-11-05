@@ -9,6 +9,7 @@ const settingsSchema = z.object({
   tutorialEngine: z.enum(['firefox', 'chromium']).optional(), tutorialFps: z.number().positive().optional(),
   tutorialSize: z.object({ width: z.number().positive(), height: z.number().positive() }).optional(),
   maxTutorialScenes: z.number().positive().optional(), tutorialSubtitles: z.boolean().optional(),
+  tutorialStyle: z.string().optional(), tutorialTransition: z.string().optional(),
   cookiePath: z.string().nullable().optional(), proxyUrl: z.string().nullable().optional(),
   model: z.string().optional(), browserPath: z.string().optional(), profileDir: z.string().optional(),
 });
@@ -47,9 +48,10 @@ export async function tutorialParamsFromRun(run: RunContext): Promise<CreateTuto
     generatedClipsDir: path.join(run.outDir, 'generated-clips'),
     narrationLanguage: config.narrationLang || config.language || research.transcript.language || 'en',
     ttsVoice: config.ttsVoice, ttsRate: config.ttsRate,
-    engine: config.tutorialEngine || 'firefox', fps: config.tutorialFps,
+    engine: config.tutorialEngine || 'chromium', fps: config.tutorialFps,
     width: config.tutorialSize?.width, height: config.tutorialSize?.height,
     maxScenes: config.maxTutorialScenes, subtitles: config.tutorialSubtitles,
+    style: config.tutorialStyle, transition: config.tutorialTransition,
     cookiePath: config.cookiePath, proxyUrl: config.proxyUrl, model: config.model, profileDir: config.profileDir,
     browserPath: config.tutorialEngine === 'chromium' ? config.browserPath : undefined,
   };

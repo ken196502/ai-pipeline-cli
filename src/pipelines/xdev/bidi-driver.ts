@@ -50,6 +50,9 @@ export class FirefoxBiDiDriver {
       logLevel: 'error',
     });
 
+    // Increase script timeout from default 30s to 120s to prevent Webdriver script timeout during heavy page loads
+    await this.browser.setTimeout({ script: 120_000, pageLoad: 120_000 });
+
     return this.browser;
   }
 

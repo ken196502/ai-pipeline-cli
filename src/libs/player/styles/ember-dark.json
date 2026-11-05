@@ -1,0 +1,68 @@
+{
+  "version": "1",
+  "extends": "preset:ember-dark",
+  "theme": {
+    "bg": "#0A0A0B",
+    "ink2": "#151517",
+    "accent": "#FF4D12",
+    "palette": {
+      "bone": "#EEE9DF",
+      "ash": "#9C978F",
+      "graphite": "#5E5B57",
+      "ember": "#FF8A3D",
+      "blood": "#C21D0B",
+      "acid": "#D8FF3C"
+    },
+    "font": "\"D-DIN Exp\", \"D-DIN\", Inter, \"Segoe UI\", system-ui, -apple-system, sans-serif"
+  },
+  "timing": {
+    "titleIn": 0.55,
+    "titleHold": 1.1,
+    "titleOut": 0.55,
+    "titleSafePad": 0.1,
+    "lineGap": 0.12,
+    "shotGap": 0.18,
+    "clipTail": 0.5,
+    "shotDur": 4.2,
+    "shotTrans": 0.8,
+    "clipTrans": 1.0
+  },
+  "components": {
+    "flash": {
+      "interval": 0.2,
+      "punch": 0.04,
+      "shutter": 0.22,
+      "border": "accent",
+      "pool": "tag:candidate",
+      "badge": true
+    },
+    "finalShowcase": {
+      "tag": "FINAL AI VIDEO SHOWCASE",
+      "audio": "source",
+      "asset": "final-ai-video",
+      "fit": "contain"
+    },
+    "subtitleBanner": { "enabled": false }
+  },
+  "camera": { "mode": "auto-drift", "zoomRange": [1.0, 1.06], "rollMax": 0.01, "driftPx": 18 },
+  "transitions": {
+    "clip": {
+      "mode": "sequence",
+      "pool": ["directionalWarp", "lumaGlitch", "radialBloom"],
+      "seed": 7,
+      "params": {}
+    },
+    "shot": { "type": "conveyor" },
+    "visualSwap": { "type": "slide-fade" }
+  },
+  "post": {
+    "renderer": "webgl",
+    "halation": 0,
+    "halationTint": "#FF2E0A",
+    "grain": 0.05,
+    "chromaticAberration": 0,
+    "vignette": 0.35,
+    "contrast": 1.05
+  },
+  "overrides": {}
+}

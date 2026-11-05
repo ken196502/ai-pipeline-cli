@@ -6,7 +6,7 @@
  */
 import { FlowVideoScriptSchema } from '../research/script/contracts.js';
 import type { RunContext } from '../run/index.js';
-import { readFile, stat, writeFile, mkdir, rename } from 'node:fs/promises';
+import { readFile, stat, writeFile, mkdir, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import pc from 'picocolors';
 import { launchRealChrome, type RealChromeSession } from '../browser/real-chrome-launcher.js';
@@ -29,6 +29,7 @@ import {
   setClipboardImage,
 } from '../input/system-input.js';
 import { planClipGeneration } from './clip-plan.js';
+import { MediaIdentityLedger, findCrossClipDuplicateKeyframes } from './media-ledger.js';
 import { extractLastFrame } from '../research/media/frames.js';
 import {
   DEFAULT_PROFILE_DIR,
@@ -687,8 +688,14 @@ export class FlowClientExt {
     bridge: NativeBridge,
     baseline: number | Set<string>,
     timeoutMs: number = 120_000,
-    errorBaseline: string[] = []
+    errorBaseline: string[] = [],
+    guard?: { submittedAt?: number; minGenerationMs?: number }
   ): Promise<{ src: string | null; rect: ElementRect; key: string | null; mediaId: string | null }> {
+    const minGenerationMs = guard?.minGenerationMs ?? 3_000;
+    const submittedAt = guard?.submittedAt ?? null;
+    const tooEarly = (): boolean =>
+      submittedAt !== null && Date.now() - submittedAt < minGenerationMs;
+
     const deadline = Date.now() + timeoutMs;
 
     // Canonical-token baseline: the virtualized canvas recycles tile elements,
@@ -732,7 +739,7 @@ export class FlowClientExt {
         return imageTiles.length > baseline;
       });
 
-      if (state.pendingTiles === 0) {
+      if (state.pendingTiles === 0 && !tooEarly()) {
         const ready = fresh.find((t) => t.src && t.src.startsWith('http')) || null;
         if (ready) {
           return {
@@ -963,6 +970,12 @@ export class FlowClientExt {
     referencePreviousImage?: boolean;
     referenceKey?: string | null;
     referenceMode?: 'required' | 'optional';
+    /**
+     * Every media identity this run has already consumed. Merged into the freshness
+     * baseline so the virtualized canvas cannot hand back an old card (e.g. the previous
+     * clip's keyframe) as the "new" image.
+     */
+    excludeKeys?: Array<string | null | undefined>;
   }): Promise<ClipImageResult> {
     console.log(pc.cyan(`[flow-ext] ${opts.label}: generating keyframe image...`));
     console.log(pc.gray(`Image Prompt: "${opts.imagePrompt.slice(0, 80)}..."`));
@@ -1044,12 +1057,24 @@ export class FlowClientExt {
     // Fill prompt and generate
     await this.fillPrompt(bridge, opts.imagePrompt);
     await sleep(randomDelay(1500, 3000)); // Human-like review pause before clicking Generate
+    const submittedAt = Date.now();
     await this.clickGenerate(bridge);
     await this.handleApprovalModal(bridge);
     console.log(pc.green(`✓ ${opts.label}: image generation submitted`));
 
+    // Freshness baseline = cards mounted now + every identity the run already consumed
+    // + the reference card. The canvas recycles cards, so "not currently mounted" is NOT
+    // proof of freshness; the ledger is (see src/flow/media-ledger.ts).
+    const freshnessKeys = new Set(knownImageKeys);
+    for (const key of opts.excludeKeys ?? []) {
+      if (key) freshnessKeys.add(key);
+    }
+    if (opts.referenceKey) freshnessKeys.add(opts.referenceKey);
+
     // Wait for the NEW image card by identity (video cards are never returned)
-    const newTile = await this.waitForNewImageTile(bridge, knownImageKeys, opts.timeoutMs ?? 120_000, errorBaseline);
+    const newTile = await this.waitForNewImageTile(bridge, freshnessKeys, opts.timeoutMs ?? 120_000, errorBaseline, {
+      submittedAt,
+    });
     console.log(pc.green(`✓ ${opts.label}: new image card created`));
 
     // Download keyframe image if requested (verified; never record a missing file)
@@ -1901,6 +1926,8 @@ export class FlowClientExt {
         profileDir,
         referencePreviousImage: true,
         referenceKey: startImage.mediaKey,
+        // The end image must never be resolved to the start image it was just built from.
+        excludeKeys: [startImage.mediaKey, startImage.mediaId, startImage.imageUrl, startImage.imageOutputPath],
       });
 
       console.log(pc.cyan(`[flow-ext] Step 3/3: Generating Frames video (NO right-click animate)...`));
@@ -2032,6 +2059,67 @@ export class FlowClientExt {
       throw new Error(`Invalid or empty script: ${scriptPath}`);
     }
 
+    const persistScript = async () => {
+      if (run) await run.write('script', FlowVideoScriptSchema.parse(script));
+      else await writeFile(scriptPath, JSON.stringify(script, null, 2) + '\n', 'utf8');
+    };
+
+    // ── Repair scripts written before the media-identity fix ──
+    // A clip that recorded ANOTHER clip's keyframe (observed: clip-006 == clip-005) would
+    // otherwise be "reused" by the hasStartImage/hasEndImage fast path AND its already
+    // rendered video would be kept by the exactly-once download.
+    const duplicateKeyframes = findCrossClipDuplicateKeyframes(script.clips);
+    if (duplicateKeyframes.length > 0) {
+      const repairedClips = new Set<number>();
+      for (const finding of duplicateKeyframes) {
+        const clip = script.clips.find((c) => c.clipIndex === finding.clipIndex);
+        if (!clip) continue;
+        const owner = script.clips.find((c) => c.clipIndex === finding.ownerClipIndex);
+        const label = `clip-${String(clip.clipIndex).padStart(3, '0')}`;
+        const ownerLabel = `clip-${String(finding.ownerClipIndex).padStart(3, '0')}`;
+        const stalePath = finding.field === 'start' ? clip.localImagePath : clip.localEndImagePath;
+        const ownerPath = finding.field === 'start' ? owner?.localImagePath : owner?.localEndImagePath;
+
+        console.warn(
+          pc.yellow(
+            `[flow-ext] ⚠ ${label}: recorded ${finding.field} keyframe is the SAME media as ${ownerLabel} (${finding.identity}) — discarding it and regenerating this clip`
+          )
+        );
+
+        if (finding.field === 'start') {
+          delete clip.imageUrl;
+          delete clip.localImagePath;
+          clip.imageTileKey = null;
+        } else {
+          delete clip.endImageUrl;
+          delete clip.localEndImagePath;
+          clip.endImageTileKey = null;
+        }
+
+        // Never delete a file another clip still owns.
+        if (stalePath && path.resolve(stalePath) !== (ownerPath ? path.resolve(ownerPath) : null)) {
+          await unlink(path.resolve(stalePath)).catch(() => {});
+        }
+        repairedClips.add(clip.clipIndex);
+      }
+
+      for (const clipIndex of repairedClips) {
+        const clip = script.clips.find((c) => c.clipIndex === clipIndex);
+        if (!clip) continue;
+        const label = `clip-${String(clipIndex).padStart(3, '0')}`;
+        if (clip.status === 'completed') {
+          console.warn(pc.yellow(`[flow-ext] ⚠ ${label}: previously marked completed from the discarded keyframes — re-queued for regeneration`));
+        }
+        clip.status = 'pending';
+        delete clip.videoUrl;
+        delete clip.localVideoPath;
+        delete clip.error;
+        await unlink(path.join(outDir, `${label}.mp4`)).catch(() => {});
+      }
+
+      await persistScript();
+    }
+
     const eligible = script.clips.filter(
       (c) => c.status !== 'completed' && (!rawOptions.maxClips || c.clipIndex <= rawOptions.maxClips)
     );
@@ -2098,9 +2186,23 @@ export class FlowClientExt {
     let failed = 0;
     let latestCredits: number | undefined;
 
-    const persistScript = async () => {
-      if (run) await run.write('script', FlowVideoScriptSchema.parse(script));
-      else await writeFile(scriptPath, JSON.stringify(script, null, 2) + '\n', 'utf8');
+    // Run-level media identity ledger: every media this script already records
+    // (including clips completed by a previous session) is consumed and must never be
+    // returned as a freshly generated keyframe. See src/flow/media-ledger.ts.
+    const mediaLedger = await MediaIdentityLedger.seedFromScriptClips(script.clips);
+    console.log(pc.gray(`[flow-ext] Media identity ledger seeded with ${mediaLedger.snapshot().length} consumed identity token(s)`));
+
+    const assertFreshKeyframe = async (
+      owner: string,
+      filePath: string | null | undefined
+    ): Promise<void> => {
+      const duplicateOf = await mediaLedger.registerKeyframe(owner, filePath ?? null);
+      // Same-owner repeat = this clip's own already-downloaded file (exactly-once download).
+      if (duplicateOf && duplicateOf !== owner) {
+        throw new Error(
+          `${owner} keyframe is byte-identical to ${duplicateOf} — the Flow canvas returned previously generated media instead of a new image`
+        );
+      }
     };
 
     // ── Alternating rhythm: one video per clip, clip by clip ──
@@ -2252,6 +2354,7 @@ export class FlowClientExt {
           clip.status = 'completed';
           clip.videoUrl = video.videoUrl;
           clip.localVideoPath = video.outputPath ?? undefined;
+          mediaLedger.add(`${item.label} video`, [clip.videoUrl, clip.localVideoPath]);
           delete clip.error;
           await persistScript();
           results.push({
@@ -2312,6 +2415,8 @@ export class FlowClientExt {
             referencePreviousImage: true,
             referenceKey: previousImageKey,
             referenceMode: 'optional',
+            // Never accept ANY media this run already consumed as the "new" start frame.
+            excludeKeys: mediaLedger.snapshot(),
           });
 
           clip.imageUrl = startImg.imageUrl || undefined;
@@ -2319,6 +2424,8 @@ export class FlowClientExt {
           // Truthful identity: src UUID, else content hash of the downloaded file
           // (recycled tiles carry stale attribute keys; asb srcs carry no UUID).
           clip.imageTileKey = await resolveMediaKey(startImg.imageUrl, startImg.imageOutputPath, startImg.mediaKey);
+          await assertFreshKeyframe(`${item.label} start`, clip.localImagePath);
+          mediaLedger.add(`${item.label} start`, [clip.imageTileKey, clip.imageUrl, clip.localImagePath]);
           delete clip.error;
           await persistScript();
           console.log(pc.green(`✓ ${item.label}: Start keyframe image ready`));
@@ -2357,6 +2464,14 @@ export class FlowClientExt {
             referencePreviousImage: true,
             referenceKey: clip.imageTileKey ?? null,
             referenceMode: 'optional',
+            // Exclude the start image AND every media already consumed by the run, so an
+            // old card (e.g. the previous clip's start/end frame) is never taken as new.
+            excludeKeys: [
+              ...mediaLedger.snapshot(),
+              clip.imageTileKey ?? null,
+              clip.imageUrl ?? null,
+              clip.localImagePath ?? null,
+            ],
           });
 
           clip.endImageUrl = endImg.imageUrl || undefined;
@@ -2364,6 +2479,8 @@ export class FlowClientExt {
           // Truthful identity: src UUID, else content hash of the downloaded file
           // (recycled tiles carry stale attribute keys; asb srcs carry no UUID).
           clip.endImageTileKey = await resolveMediaKey(endImg.imageUrl, endImg.imageOutputPath, endImg.mediaKey);
+          await assertFreshKeyframe(`${item.label} end`, clip.localEndImagePath);
+          mediaLedger.add(`${item.label} end`, [clip.endImageTileKey, clip.endImageUrl, clip.localEndImagePath]);
           delete clip.error;
           await persistScript();
           console.log(pc.green(`✓ ${item.label}: End keyframe image ready`));
@@ -2508,6 +2625,7 @@ export class FlowClientExt {
         clip.status = 'completed';
         clip.videoUrl = video.videoUrl;
         clip.localVideoPath = video.outputPath ?? undefined;
+        mediaLedger.add(`${item.label} video`, [clip.videoUrl, clip.localVideoPath]);
         delete clip.error;
         await persistScript();
         results.push({

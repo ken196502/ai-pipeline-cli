@@ -5,14 +5,18 @@ import { sendMsg, notifyError, formatDetailedErrorMessage, describeNotifyTargets
 
 import { FirefoxBiDiDriver } from './bidi-driver.js';
 import { scrapeTweetsForKeywords } from './scraper.js';
-import { loadXDevHistory, splitByHistory } from './history.js';
+import { splitByHistory } from './history.js';
+import { loadAccountPublishedHistory } from './account-history.js';
 import {
   evaluateAndSelectCoreThemes,
   fetchSelectedArticles,
+  generateCreativeSparkInsights,
   generateSvgArchitectureDiagram,
   generateSvgSequenceDiagram,
   synthesizeFocusedArticle,
+  assembleArticle,
   buildHeaderBannerSvg,
+  type CreativeSparkAnalysis,
 } from './analyzer.js';
 import { generateImageFromEnv } from './image-generator.js';
 import { convertMarkdownToStandaloneHtml } from './html-exporter.js';
@@ -73,6 +77,7 @@ export async function runXDevPipeline(options: XDevPipelineOptions): Promise<XDe
   let thoughtArticlePath = '';
   let standaloneHtmlPath = '';
   let grokResponsePath = '';
+  let creativeSparksPath = '';
   let xArticleUrl = '';
   let xArticleEditUrl = '';
   let xArticleScreenshots: string[] = [];
@@ -109,17 +114,17 @@ export async function runXDevPipeline(options: XDevPipelineOptions): Promise<XDe
       );
     }
 
-    // Drop tweets a previous run already wrote about. Prompt-level instructions were
-    // not enough: the same /status/<id> was selected in 7 consecutive runs.
-    const history = await loadXDevHistory(baseDir);
+    // Drop tweets that have already been genuinely PUBLISHED on the X account.
+    // We inspect the logged-in account's published articles directly, falling back to local history only if inspection fails.
+    const history = await loadAccountPublishedHistory(browser);
     const { fresh: freshTweets, repeated } = splitByHistory(allTweets, history);
     if (repeated.length) {
-      console.log(pc.yellow(`  ⚠ 跳过 ${repeated.length} 条往期已写过的推文：`));
+      console.log(pc.yellow(`  ⚠ 跳过 ${repeated.length} 条已在 X 上发布过的推文：`));
       for (const r of repeated) {
-        console.log(pc.dim(`    • ${r.tweet.url} (已在 ${r.previousRunId} 写过)`));
+        console.log(pc.dim(`    • ${r.tweet.url} (已在文章 "${r.previousTopic || r.previousRunId}" 中发布)`));
       }
     }
-    console.log(pc.dim(`  • 历史 ${history.length} 期，可用新题材 ${freshTweets.length} 条`));
+    console.log(pc.dim(`  • 线上已发布文章历史 ${history.length} 期，可用新题材 ${freshTweets.length} 条`));
 
     if (freshTweets.length === 0) {
       throw new OperationalWarningError(
@@ -152,14 +157,96 @@ export async function runXDevPipeline(options: XDevPipelineOptions): Promise<XDe
       summary: `Deep fetched linked articles for selected core topics.`,
     });
 
+    // Stage 3.5: Sparks & Practice Collision Pass (Pre-Grok Structured Thinking)
+    activeStage = 'sparks-practice-collision';
+    const stage35Start = Date.now();
+    const primary = evalResult.selectedTopics[0];
+    const primaryTopic = primary.topicTitle;
+    const primaryPerspective = primary.corePerspectiveZh;
+
+    console.log(pc.cyan('\n[Stage 3.5/7] 实践碰撞点池：为本期推文选取最契合的单个碰撞点，生成四维洞见...'));
+    const materialPreGrok = [
+      `### 推文原文\n作者: ${primary.tweet.authorName} (${primary.tweet.authorHandle})\n链接: ${primary.tweet.url}\n${primary.tweet.text}`,
+      ...primary.tweet.blogs.map(
+        (b, i) => `### 外链文章 ${i + 1}: ${b.title || b.url}\nURL: ${b.url}\n${(b.content || '').slice(0, 5000)}`
+      ),
+    ].join('\n\n');
+
+    const creativeSparks = await generateCreativeSparkInsights({
+      topicTitle: primaryTopic,
+      corePerspectiveZh: primaryPerspective,
+      tweetAuthor: `${primary.tweet.authorName} (@${primary.tweet.authorHandle})`,
+      tweetUrl: primary.tweet.url,
+      material: materialPreGrok,
+    });
+
+    console.log(
+      pc.green(
+        `  • 选定实践碰撞点: ${creativeSparks.selectedCollisionPointId} (契合度: ${creativeSparks.hasMeaningfulFit ? '有契合点' : '无显著契合点'})`
+      )
+    );
+
+    if (creativeSparks.rawText) {
+      creativeSparksPath = path.join(outDir, `creative-sparks-${timestamp}.md`);
+      const sparksFileContent = `# Creative Sparks & Practice Collision Analysis
+- **Timestamp**: ${new Date().toISOString()}
+- **Target Topic**: ${primaryTopic}
+- **Selected Collision Point**: ${creativeSparks.selectedCollisionPointId}
+- **Source Tweet**: [${primary.tweet.authorName} (@${primary.tweet.authorHandle})](${primary.tweet.url})
+
+## 1. 契合点 (Core Fit & Intersection Points)
+${creativeSparks.fitPoints || '（未单独分段提取）'}
+
+## 2. 推文核心技术映射 (Tweet Substance & Grounding)
+${creativeSparks.tweetRelevance || '（未单独分段提取）'}
+
+## 3. 实践冲突与合拍度辨析 (Tension & Harmony with Practical CLI Repo Workflow)
+${creativeSparks.conflictOrAlignment || '（未单独分段提取）'}
+
+## 4. 冲突解决与结合提升方案 (Conflict Resolution, Synergy & Elevation)
+${creativeSparks.resolutionOrSynergy || '（未单独分段提取）'}
+
+---
+
+### Raw Collision Output
+${creativeSparks.rawText}
+`;
+      await fs.writeFile(creativeSparksPath, sparksFileContent, 'utf-8');
+      console.log(pc.green(`  ✔ 灵感碰撞产物已生成并归档: ${creativeSparksPath}`));
+    }
+
+    stages.push({
+      stage: 'sparks-practice-collision',
+      status: 'completed',
+      durationMs: Date.now() - stage35Start,
+      summary: `Completed 4-dimension practice collision analysis with Git-backed CLI repo as collaborative execution tool & traceability bedrock.`,
+    });
+
     // Stage 4: Grok academic & industry enrichment (Strict Fail-Fast, no fallback)
     activeStage = 'grok-academic-enrichment';
     const stage4Start = Date.now();
 
-    console.log(pc.cyan('[Stage 4/7] Consulting Grok on x.com for latest academic research & authoritative tech media analysis...'));
-    const primaryTopic = evalResult.selectedTopics[0].topicTitle;
-    const primaryPerspective = evalResult.selectedTopics[0].corePerspectiveZh;
-    const grokPrompt = `联网搜索关于 "${primaryTopic}" 的最新权威技术分析与一线工程实践，总结核心事实、落地机制与技术权衡。在回答中必须明确附带引用内容、论文、博客与工程报告的真实可访问超链接（Markdown 链接格式如 [标题/机构](URL)）。`;
+    console.log(pc.cyan('\n[Stage 4/7] Consulting Grok on x.com for latest academic research & authoritative tech media analysis...'));
+
+    let grokPrompt = '';
+    if (creativeSparks.hasMeaningfulFit && creativeSparks.resolutionOrSynergy) {
+      // 场景 1：命中实践碰撞结合点，专门调研该结合点落地结论在工业界/学术界的具体实践与佐证
+      grokPrompt = `请联网深度调研主题 "${primaryTopic}"，并重点调研以下工程落地结论在主流技术团队（如 Anthropic, OpenAI, Cursor, GitHub 等）或学术界的最新实践与实证数据：
+【结合落地核心主张】：${creativeSparks.resolutionOrSynergy.trim()}
+
+请聚焦：
+1. 业界在落地该模式时的具体架构机制、权衡取舍与性能指标；
+2. 真实生产环境中的踩坑教训或正面验证案例。
+必须明确附带引用内容、论文、官方技术博客与工程报告的真实可访问超链接（Markdown 链接格式如 [标题/机构](URL)）。`;
+    } else {
+      // 场景 2：未命中结合点，执行专门的批判方向调研（批判让 LLM 编排一切，调研脑洞/计划与实施隔离、Pipeline 与沙盒执行）
+      grokPrompt = `请联网针对主题 "${primaryTopic}" 展开深度的批判性工程调研：
+1. 【批判方向】：调研当前行业试图让单一 LLM 模型或无约束 Agent 循环“动态编排一切”时遭遇的典型生产事故与系统失效（如上下文膨胀/污染、状态死循环、工具调用失真、无法调试与不可重放）。
+2. 【工程破局】：调研主流顶尖团队（如 SWE-bench 顶级选手、Devin 架构演进、Anthropic Workflows、代码生成工厂等）如何将“脑洞/计划（Planning）”与“实施执行（Execution）”进行严格的物理上下文隔离。
+3. 【具体实践】：搜集以“确定性 AI 工作流/Pipeline + 强类型结构化上下文 + 隔离沙盒环境（Sandbox）”执行工具调用与代码改动的真实案例、架构论文或权威博客。
+
+必须明确附带引用内容、论文、官方工程博客与真实技术报告的可访问超链接（Markdown 链接格式如 [标题/机构](URL)）。`;
+    }
 
     let grokEnrichmentText = '';
     try {
@@ -177,7 +264,7 @@ export async function runXDevPipeline(options: XDevPipelineOptions): Promise<XDe
       );
 
     if (isGrokValid) {
-      grokResponsePath = path.join(outDir, `grok-response-${timestamp}.md`);
+      grokResponsePath = path.join(outDir, `grok-response-${timestamp}.txt`);
       const grokFileContent = `# Grok Live Research Response
 - **Timestamp**: ${new Date().toISOString()}
 - **Target Topic**: ${primaryTopic}
@@ -206,54 +293,68 @@ ${grokEnrichmentText}
       summary: 'Enriched via Grok live academic and industry query.',
     });
 
-    // Stage 5: Asset generation (Real Image Model Header + Architectural Vector SVGs)
-    activeStage = 'asset-generation';
+    // Stage 5: Synthesize pure technical article first
+    activeStage = 'article-synthesis';
     const stage5Start = Date.now();
 
-    console.log(pc.cyan('[Stage 5/7] Generating real header image via env IMAGE_MODEL and architectural SVGs...'));
-    const headerImagePath = path.join(outDir, `header-image-${timestamp}.png`);
-    const primaryTopicEn =
-      evalResult.selectedTopics[0].topicTitleEn ||
-      evalResult.selectedTopics[0].tweet.text.slice(0, 80).replace(/https?:\/\/\S+/g, '').trim() ||
-      'Distributed Agent State & Context Architecture';
-    // Strictly English prompt with no text overlay to avoid rendered typographical garbage or Chinese characters
-    await generateImageFromEnv({
-      prompt: `Sophisticated minimalist abstract technology 3D illustration in Google Material 3 and Apple clean industrial design aesthetic, crisp off-white background (#F8FAFC), elegant translucent frosted glass layers, precision pastel geometric volumes, subtle ambient shadows, Apple System Blue and vibrant modern accents, high-end editorial tech publication quality, 8k resolution, completely clean with NO text, NO typography, NO watermark, NO letters: ${primaryTopicEn}`,
-      outputPath: headerImagePath,
-      size: '1024x1024',
-    });
-
-    const svgArchitecture = await generateSvgArchitectureDiagram(primaryTopicEn);
-    const svgSequence = await generateSvgSequenceDiagram(primaryTopicEn);
-
-    stages.push({
-      stage: 'asset-generation',
-      status: 'completed',
-      durationMs: Date.now() - stage5Start,
-      summary: `Generated real header image (${path.basename(headerImagePath)}) and 2 architectural SVGs.`,
-    });
-
-    // Stage 6: Synthesize pure technical article
-    activeStage = 'article-synthesis';
-    const stage6Start = Date.now();
-
-    console.log(pc.cyan('[Stage 6/7] Synthesizing human-tone technical blog focused 100% on selected perspective...'));
-    const thoughtArticleMarkdown = await synthesizeFocusedArticle({
+    console.log(pc.cyan('[Stage 5/7] Synthesizing human-tone technical blog focused 100% on selected perspective...'));
+    const rawArticleMarkdown = await synthesizeFocusedArticle({
       evalResult,
-      svgArchitecture,
-      svgSequence,
-      headerImagePath,
+      creativeSparks,
       grokEnrichmentText,
       history,
     });
 
-
-
     stages.push({
       stage: 'article-synthesis',
       status: 'completed',
-      durationMs: Date.now() - stage6Start,
+      durationMs: Date.now() - stage5Start,
       summary: `Synthesized pure thought article focused on: ${primaryTopic}.`,
+    });
+
+    // Stage 6: Asset generation grounded directly in the synthesized article
+    // (Real Image Model Header + Architectural Vector SVGs derived from the article content)
+    activeStage = 'asset-generation';
+    const stage6Start = Date.now();
+
+    console.log(pc.cyan('[Stage 6/7] Generating real header image and architectural SVGs tailored to article text...'));
+    const headerImagePath = path.join(outDir, `header-image-${timestamp}.png`);
+    const articleH1 = rawArticleMarkdown.match(/^#\s+(.+)$/m)?.[1]?.trim();
+    const primaryTopicEn =
+      articleH1 ||
+      evalResult.selectedTopics[0].topicTitleEn ||
+      'Distributed Agent State & Context Architecture';
+
+    // Generate topic-accurate header image derived from the synthesized article's theme
+    await generateImageFromEnv({
+      prompt: `High-end editorial 3D architectural illustration depicting the core engineering concept of the technical article: a prominent, radiant continuous pipeline and verification lattice, translucent frosted glass ribbons, precision modular geometric nodes in Apple and Google Material Design aesthetic. Emphasize a rich, vibrant Parisian macaron color palette with harmonious multi-tone pastel gradients: pistachio mint, delicate coral peach, lilac lavender, creamy lemon, powder sky cyan, and soft strawberry blush. Clean light ivory background (#F8FAFC), rich soft pastel subsurface scattering, diffuse studio lighting, 8k resolution, completely clean with NO text, NO typography, NO watermark, NO letters. Subject: ${primaryTopicEn}`,
+      outputPath: headerImagePath,
+      size: '1024x1024',
+    });
+
+    // Generate Architectural & Sequence SVGs grounded directly in the synthesized article body
+    const svgContext = {
+      topicTitle: primaryTopicEn,
+      articleTitle: articleH1 || evalResult.articleTitle || primaryTopic,
+      articleBody: rawArticleMarkdown,
+      creativeSparks: creativeSparks?.rawText,
+    };
+    const svgArchitecture = await generateSvgArchitectureDiagram(svgContext);
+    const svgSequence = await generateSvgSequenceDiagram(svgContext);
+
+    // Assemble final markdown with embedded visual assets
+    const thoughtArticleMarkdown = assembleArticle(rawArticleMarkdown, {
+      articleTitle: articleH1 || evalResult.articleTitle || primaryTopic,
+      headerImagePath,
+      svgArchitecture,
+      svgSequence,
+    });
+
+    stages.push({
+      stage: 'asset-generation',
+      status: 'completed',
+      durationMs: Date.now() - stage6Start,
+      summary: `Generated real header image (${path.basename(headerImagePath)}) and 2 article-tailored SVGs.`,
     });
 
     // Stage 6.5: Fill (or publish) the native X Article
@@ -477,6 +578,7 @@ ${stages.map((s) => `- **${s.stage}** (${s.durationMs}ms): ${s.summary}`).join('
       thoughtArticleHtmlPath: standaloneHtmlPath,
       thoughtArticleMarkdown,
       grokResponsePath,
+      creativeSparksPath: creativeSparksPath || undefined,
       stages,
     };
   } catch (err: any) {

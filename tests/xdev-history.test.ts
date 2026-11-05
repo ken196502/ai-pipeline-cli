@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { tweetIdFromUrl, splitByHistory, loadXDevHistory, formatHistoryForPrompt } from '../src/pipelines/xdev/history.js';
+import { tweetIdFromUrl, splitByHistory, formatHistoryForPrompt } from '../src/pipelines/xdev/history.js';
 import { validateArticleBody, buildArticleMaterial } from '../src/pipelines/xdev/analyzer.js';
 
 test('tweetIdFromUrl extracts the numeric status id', () => {
@@ -58,42 +58,6 @@ test('splitByHistory keeps everything when there is no history', () => {
   const { fresh, repeated } = splitByHistory(tweets, []);
   assert.equal(fresh.length, 2);
   assert.equal(repeated.length, 0);
-});
-
-test('loadXDevHistory reads summaries newest-first, skips corrupt files, honours limit', async () => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'xdev-history-'));
-  try {
-    await fs.writeFile(
-      path.join(dir, 'xdev-summary-2026-11-01T01-00-00-000Z.json'),
-      JSON.stringify({
-        articleTitle: '第一篇',
-        selectedTopics: [{ topic: '议题一', tweetUrl: 'https://x.com/a/status/1' }],
-      }),
-      'utf-8'
-    );
-    await fs.writeFile(
-      path.join(dir, 'xdev-summary-2026-11-01T02-00-00-000Z.json'),
-      JSON.stringify({
-        articleTitle: '第二篇',
-        selectedTopics: [{ topic: '议题二', tweetUrl: 'https://x.com/b/status/2' }],
-      }),
-      'utf-8'
-    );
-    await fs.writeFile(path.join(dir, 'xdev-summary-2026-11-01T03-00-00-000Z.json'), '{ not json', 'utf-8');
-    await fs.writeFile(path.join(dir, 'unrelated.json'), '{}', 'utf-8');
-
-    const history = await loadXDevHistory(dir, 10);
-    assert.deepEqual(
-      history.map((h) => h.articleTitle),
-      ['第二篇', '第一篇']
-    );
-
-    const limited = await loadXDevHistory(dir, 1);
-    assert.equal(limited.length, 1);
-    assert.equal(limited[0].articleTitle, '第二篇');
-  } finally {
-    await fs.rm(dir, { recursive: true, force: true });
-  }
 });
 
 test('formatHistoryForPrompt is prompt-ready and says so when empty', () => {

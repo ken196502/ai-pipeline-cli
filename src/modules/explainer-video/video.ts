@@ -10,6 +10,7 @@ import {
   generateExplainerStoryboard,
   produceExplainerVideo,
 } from './produce.js';
+import { listLucideIconNames } from '../../libs/player/icons.js';
 import { maskProfanity } from '../../utils/text.js';
 import type { XHotEvalResult } from '../evaluation/contracts.js';
 import type { XHotHarvestResult } from '../harvest/contracts.js';
@@ -41,13 +42,16 @@ export async function buildExplainerAssets(
         label: `X Topic Search Grid: ${evalResult.query}`,
         src: `assets/${path.basename(dest)}`,
         sourcePath: dest,
+        tags: ['candidate'],
       });
-    } catch {}
+    } catch (err: any) {
+      console.warn(pc.yellow(`[explainer-video] could not package candidate grid: ${err?.message || err}`));
+    }
 
     // Check for candidate-shots directory next to gridImagePath
     try {
       const candShotsDir = path.join(path.dirname(evalResult.gridImagePath), 'candidate-shots');
-      const candEntries = await fs.readdir(candShotsDir).catch(() => []);
+      const candEntries = await fs.readdir(candShotsDir).catch(() => [] as string[]);
       for (const entry of candEntries.sort()) {
         if (!entry.endsWith('.png') && !entry.endsWith('.jpg') && !entry.endsWith('.jpeg')) continue;
         const srcPath = path.join(candShotsDir, entry);
@@ -60,9 +64,12 @@ export async function buildExplainerAssets(
           label: `Trending Candidate: ${candId}`,
           src: `assets/${entry}`,
           sourcePath: destPath,
+          tags: ['candidate'],
         });
       }
-    } catch {}
+    } catch (err: any) {
+      console.warn(pc.yellow(`[explainer-video] could not package candidate shots: ${err?.message || err}`));
+    }
   }
 
   // 2. Harvested Tweets Screenshots & Media
@@ -83,7 +90,11 @@ export async function buildExplainerAssets(
           src: `assets/${path.basename(dest)}`,
           sourcePath: dest,
         });
-      } catch {}
+      } catch (err: any) {
+        console.warn(
+          pc.yellow(`[explainer-video] could not package tweet screenshot ${prefix}: ${err?.message || err}`)
+        );
+      }
     }
 
     // Media attachments (images & videos)
@@ -105,7 +116,11 @@ export async function buildExplainerAssets(
           src: `assets/${destName}`,
           sourcePath: destPath,
         });
-      } catch {}
+      } catch (err: any) {
+        console.warn(
+          pc.yellow(`[explainer-video] could not package media ${destName}: ${err?.message || err}`)
+        );
+      }
     }
   }
 
@@ -151,17 +166,19 @@ export async function generateExplainerStoryboardFromXHot(
 You craft calm, authoritative, deeply informative, and engaging documentary videos about breaking tech announcements and hot AI models based on X (Twitter) trending discussions.
 The presentation is rendered using the OpusVideo canvas procedural engine featuring two parallel, distinct visual modes:
 1. Standard Split Layout (elements component):
-   - Left column: punchy 3-8 word takeaway phrases with highlight pops
+   - On-screen phrases: 3-8 word excerpts cut verbatim from the narration sentence they belong to
    - Right column: matching visual material (tweet screenshots like 'tweet-01-shot', demo videos like 'tweet-01-video-1', or Lucide vector icons like 'sparkles', 'zap', 'flame', 'award', 'trending-up', 'cpu', 'code', 'globe').
 2. Fullscreen Flash Component (standalone montage):
-   - A dedicated, full-screen rapid montage that cycles through a set of candidate assets (one snapshot every 0.2s) in sync with the spoken narration.
-   - Script Rule: The script is strictly stripped of any visual effect, transition, or animation specifications. The script ONLY arranges the narration lines and specifies the asset group name ('flash:candidates' or 'flash'). All pacing, zoom pulses, shutter effects, and rendering are handled autonomously by the player engine.
+   - A dedicated, full-screen rapid montage component ('component:flash') that cycles through a set of candidate assets in sync with the spoken narration.
+   - Script Rule: The script is strictly stripped of any visual effect, transition, animation, colour, font, timing or camera specification. The script ONLY arranges the narration lines and references the component ('component:flash'). All pacing, zoom pulses, shutter effects, theme colours and rendering are handled autonomously by the player engine + style.json.
 
 Tone & Narration Voice Guidelines:
 - Tone must be calm, steady, insightful, professional, and natural.
 - STRICTLY AVOID sensationalist, theatrical, or over-excited clickbait wording (e.g. DO NOT say "reaches a fever pitch", "exploded", "insane", "unbelievable jaw-dropping", "community goes crazy").
 - Do NOT jump back and forth with erratic emotional spikes. The narrative flow should be smooth, cohesive, and thoughtful, like a high-end Bloomberg Technology or Vox Explained mini-documentary.
-- Each shot has an elements array of [phraseText, visualRef] and an 1:1 matching spoken narration sentence.`;
+- Each shot has an elements array of [phraseText, visualRef] and an 1:1 matching spoken narration sentence.
+- PHRASE = EXCERPT RULE: every phraseText is copied VERBATIM from its own narration sentence (a contiguous 3-8 word slice of narration[i], same words, same order). Write the narration sentence first, then cut the phrase out of it. The player reveals each element exactly when the voice speaks that phrase, so a paraphrased phrase breaks the sync.
+- Layout, title-card design, typography and animation are chosen by the player. Never describe or request them.`;
 
   const userPrompt = `【Trending Winner / Topic】
 - Winner: ${evalResult.winner.name} (Rank #1)
@@ -185,26 +202,26 @@ ${tweetSummaries}
    - Tweet screenshots ('*-shot') are ONLY for showing user tweets in Chapter 2 (Community Reactions) when NO media attachment exists.
 1. Structure the presentation video into 4 or 5 concise chapters:
    - Chapter 0 (Overview/Hook): The emerging topic and trending landscape on X.
-     * IMPORTANT: For the opening hook, use a dedicated standalone shot with the Flash component (visualRef: 'flash:candidates' or 'flash'). The script only needs to provide the narration sentence and the asset group name; the player handles full-screen 0.2s rapid playback.
+     * IMPORTANT: For the opening hook, use a dedicated standalone shot with the Flash component (visualRef: 'component:flash'). The script only needs to provide the narration sentence; the player handles full-screen rapid playback and the asset pool comes from style.json.
    - Chapter 1 (The Winner Announcement): Introduce ${evalResult.winner.name}, its core technical capability, and why it ranks at the top. Use original visual media assets ('*-image-*' or '*-video-*') or distinct tech icons ('cpu', 'sparkles', 'zap').
    - Chapter 2 (Community Reactions & Proof): Showcase real discussions and user reaction tweets (prefer '*-image-*' if available; otherwise 'tweet-01-shot', 'tweet-02-shot').
    - Chapter 3 (Live Demos / Visual Showcase): Feature demo video or media image assets from the tweets (e.g. 'tweet-01-video-1', 'tweet-05-image-1', etc.). Prefer every available '*-video-*' asset here, followed by '*-image-*' high-res media. DO NOT use '*-shot' in this chapter.
    - Chapter 4 (Future & Perspective): Strategic industry context and balanced forward takeaway.
 2. In each shot:
    - For regular content shots: provide 2 to 3 elements with distinct visual assets or icons.
-   - For the opening flash montage shot: provide a single element specifying ["Trending Candidates Montage", "flash:candidates"] with its corresponding spoken narration sentence.
-   - Every phraseText must be 3-8 words, clear, concise, and professional.
-   - visualRef MUST strictly match either 'flash:candidates', an asset ID from the Available Assets above, or a valid lucide icon ('sparkles', 'zap', 'flame', 'code', 'trending-up', 'award', 'globe', 'cpu').
+   - For the opening flash montage shot: provide a single element ["<excerpt of its narration>", "component:flash"] with its corresponding spoken narration sentence.
+   - Every phraseText must be a 3-8 word VERBATIM excerpt of its paired narration sentence (narration[i] for elements[i]). Do not paraphrase, summarise, re-order or add words. Pick the most meaningful slice (the key noun phrase or claim).
+     * GOOD: narration "Among the contenders, OpenAI's GPT-6.3 Sol emerged at the forefront of developer discussions." → phrase "GPT-6.3 Sol emerged at the forefront"
+     * BAD: phrase "GPT-6.3 Sol Leads Focus" (words not in the narration)
+   - visualRef MUST strictly match either 'component:flash', an asset ID from the Available Assets above, or a valid lucide icon ('sparkles', 'zap', 'flame', 'code', 'trending-up', 'award', 'globe', 'cpu').
    - Spoken narration sentences must be delivered in natural, composed, measured English (1 sentence per element).
-3. Return PURE JSON adhering to the OpusVideo Storyboard format:
+3. Return PURE JSON adhering to the storyboard CONTENT format (content only — no colours, fonts, durations, cameras or transitions):
 {
   "title": "${evalResult.winner.name}: Analysis & Overview",
   "subtitle": "Deep Dive into the #1 Trending Topic on X",
   "meta": {
     "title": "${evalResult.winner.name}",
-    "subtitle": "Trending Overview",
-    "bg": "#0B0F19",
-    "accent": "#00F0FF"
+    "subtitle": "Trending Overview"
   },
   "clips": [
     {
@@ -212,13 +229,12 @@ ${tweetSummaries}
       "kicker": "00 · OVERVIEW",
       "title": "Trending On X",
       "subtitle": "Global Technology Overview",
-      "bg": "#0B0F19",
       "shots": [
         {
           "id": "s0_1",
           "elements": [
-            ["Emerging AI Breakthroughs", "flash"],
-            ["GPT-6.3 Sol Leads Focus", "flame"]
+            ["significant new announcements and emerging models", "component:flash"],
+            ["GPT-6.3 Sol emerged at the forefront", "flame"]
           ],
           "narration": [
             "Today's tech conversations across X centered on significant new announcements and emerging models.",
@@ -230,6 +246,11 @@ ${tweetSummaries}
   ]
 }`;
 
+  // Bind the strict material/icon schema so a hallucinated visualRef is fed back
+  // to the model instead of silently degrading to an empty icon (P0/B4).
+  const assetIds = new Set<string>(assets.map((a) => a.id));
+  const iconNames = new Set<string>(listLucideIconNames());
+
   return generateExplainerStoryboard({
     systemPrompt,
     userPrompt,
@@ -237,6 +258,8 @@ ${tweetSummaries}
     contextTask: 'storyboard',
     fallbackTitle: `${evalResult.winner.name} Showcase`,
     fallbackTopic: evalResult.query,
+    assetIds,
+    iconNames,
   });
 }
 export const generateXHotStoryboard = generateExplainerStoryboardFromXHot;
@@ -307,6 +330,10 @@ export async function createExplainerVideo(
       process.env.EXPLAINER_TTS_INSTRUCT ||
       'Speak with confidence, clarity, and crisp projection like an authoritative tech news anchor. Energetic, distinct, broadcast-ready delivery; strictly avoid whispering, mumbling, or overly quiet tone.',
     browserPath: options.browserPath,
+    profileDir: options.profileDir,
+    stylePreset: options.stylePreset ?? 'preset:cyan-tech',
+    style: options.style,
+    transition: options.transition,
     resultFilename: 'explainer-result.json',
     storyboardFilename: '10-explainer-storyboard.json',
     gridOptions: () => ({ count: 9 }),

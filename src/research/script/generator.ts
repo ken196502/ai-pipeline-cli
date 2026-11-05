@@ -17,10 +17,16 @@ import {
   type FlowClipPrompt,
   type FlowVideoScript,
   type ShotTransition,
+  type StoryPlan,
   FlowClipPromptSchema,
   FlowVideoScriptSchema,
 } from './contracts.js';
 import { sanitizeNarrationText } from './narration.js';
+import {
+  buildStoryPlan,
+  formatStoryPlanForPromptWriter,
+  type StoryPlanSegment,
+} from './story-plan.js';
 import {
   buildDeterministicVeoPrompt,
   buildReorchestrationSystemPrompt,
@@ -259,6 +265,7 @@ export interface ReorchestrateParams {
   useLlm?: boolean;
   llmConfig?: EnvConfig;
   segments?: GenerateScriptParams['segments'];
+  transcript?: Transcript;
 }
 
 /**
@@ -413,6 +420,30 @@ export async function reorchestrateExtractedPrompts(
       }
     }
 
+    // ── PASS 1/2 — screenplay + shot list (剧本/分镜规划) ──
+    // Extracted reference material is usually only character/set sheets plus a single
+    // one-shot prompt; asking the prompt writer to also invent the story produced clips
+    // whose cause and effect ran backwards. The story (and its camera coverage) is now
+    // authored explicitly first, and the prompt pass may only translate it.
+    console.log(`[script] Planning screenplay + shot list from extracted prompts and reference narration (${targetClipCount} shot(s))...`);
+    const storyPlan: StoryPlan = await buildStoryPlan({
+      vlPrompts,
+      topic: params.topic,
+      videoTitle: params.videoTitle,
+      videoSummary: params.videoSummary,
+      targetClipCount,
+      clipDuration: duration,
+      aspectRatio: aspect,
+      visualStyle: params.visualStyle,
+      segments: (params.segments || []) as StoryPlanSegment[],
+      transcript: params.transcript,
+      llmConfig: params.llmConfig,
+      clipTransitions,
+    });
+    console.log(
+      `[script] Story plan ready: ${storyPlan.shots.length} shot(s) / ${storyPlan.scenes.length} scene(s) — logline: ${storyPlan.logline || '(none)'}`
+    );
+
     const systemPrompt = buildReorchestrationSystemPrompt({
       modelTarget: params.model,
       clipDuration: duration,
@@ -430,6 +461,7 @@ export async function reorchestrateExtractedPrompts(
       modelTarget: params.model,
       clipTransitions,
       visualStyle: params.visualStyle,
+      storyPlanBlock: formatStoryPlanForPromptWriter(storyPlan, clipTransitions),
     });
 
     let value: unknown;
@@ -445,6 +477,9 @@ export async function reorchestrateExtractedPrompts(
           temperature: 0.2,
           timeoutMs: 300_000,
           task: 'prompt re-orchestration',
+          // Thinking off: this pass is a mechanical translation of the approved shot
+          // plan into prompts — reasoning only added latency and drift.
+          thinking: false,
         },
         env
       ));
@@ -479,15 +514,25 @@ export async function reorchestrateExtractedPrompts(
       throw emptyErr;
     }
 
+    // Master subject/environment definitions: the story plan is the single source of
+    // truth (it pins absolute size + unvarying appearance); the prompt pass may add to
+    // it only when the plan left the masters empty.
+    const planCharacters =
+      storyPlan.characters && Object.keys(storyPlan.characters).length > 0 ? storyPlan.characters : undefined;
+    const planBackgrounds =
+      storyPlan.backgrounds && Object.keys(storyPlan.backgrounds).length > 0 ? storyPlan.backgrounds : undefined;
+
     const characters =
-      val.characters && typeof val.characters === 'object' && !Array.isArray(val.characters)
+      planCharacters ||
+      (val.characters && typeof val.characters === 'object' && !Array.isArray(val.characters)
         ? (val.characters as Record<string, string>)
-        : undefined;
+        : undefined);
 
     const backgrounds =
-      val.backgrounds && typeof val.backgrounds === 'object' && !Array.isArray(val.backgrounds)
+      planBackgrounds ||
+      (val.backgrounds && typeof val.backgrounds === 'object' && !Array.isArray(val.backgrounds)
         ? (val.backgrounds as Record<string, string>)
-        : undefined;
+        : undefined);
 
     const overallHasNarration = typeof val.hasNarration === 'boolean'
       ? val.hasNarration
@@ -499,6 +544,7 @@ export async function reorchestrateExtractedPrompts(
     for (let i = 0; i < val.clips.length; i++) {
       const rawClip = val.clips[i] as Record<string, unknown>;
       const clipTitle = String(rawClip.title || `Clip ${i + 1}`);
+      const planShot = storyPlan.shots[i];
 
       let rawVisualPrompt = typeof rawClip.visualPrompt === 'string' ? rawClip.visualPrompt.trim() : '';
       if (!rawVisualPrompt) {
@@ -555,6 +601,23 @@ export async function reorchestrateExtractedPrompts(
       const clip = FlowClipPromptSchema.parse({
         clipIndex: typeof rawClip.clipIndex === 'number' ? rawClip.clipIndex : i + 1,
         sceneId: rawClip.sceneId || `scene-${String(i + 1).padStart(3, '0')}`,
+        locationId: typeof rawClip.locationId === 'string' && rawClip.locationId.trim()
+          ? rawClip.locationId.trim()
+          : planShot?.sceneId || undefined,
+        cameraSetup: typeof rawClip.cameraSetup === 'string' && rawClip.cameraSetup.trim()
+          ? rawClip.cameraSetup.trim()
+          : planShot
+            ? [
+                planShot.shotSize,
+                planShot.cameraAngle,
+                planShot.cameraHeight && `height ${planShot.cameraHeight}`,
+                planShot.lens && `lens ${planShot.lens}`,
+                planShot.cameraPosition && `position ${planShot.cameraPosition}`,
+              ]
+                .map((part) => (part || '').trim())
+                .filter(Boolean)
+                .join(', ') || undefined
+            : undefined,
         title: clipTitle,
         startSec: typeof rawClip.startSec === 'number' ? rawClip.startSec : i * duration,
         endSec: typeof rawClip.endSec === 'number' ? rawClip.endSec : (i + 1) * duration,
@@ -578,6 +641,17 @@ export async function reorchestrateExtractedPrompts(
       prevTitle = clipTitle;
     }
 
+    // The prompt pass may not add, drop, or reorder shots: clip N must be shot N.
+    if (clips.length !== storyPlan.shots.length) {
+      throw new AppError({
+        code: ErrorCodes.LLM_RESPONSE_INVALID,
+        message: `Prompt pass returned ${clips.length} clip(s) but the approved story plan has ${storyPlan.shots.length} shot(s) — the prompt pass may only translate the plan, never re-plan it.`,
+        stage: 'research',
+        task: 'reorchestrate-prompts',
+        retryable: false,
+      });
+    }
+
     const sanitized = sanitizeClipsForSafetyPolicy(clips);
     const result = enforceVisualStyleOnClips(sanitized, params.visualStyle);
     if (characters) {
@@ -586,6 +660,7 @@ export async function reorchestrateExtractedPrompts(
     if (backgrounds) {
       (result as any).backgrounds = backgrounds;
     }
+    (result as any).storyPlan = storyPlan;
     return result;
   }
 
@@ -724,6 +799,7 @@ export async function generateFlowVideoScript(
     useLlm: params.useLlm !== false,
     llmConfig: params.llmConfig,
     segments: params.segments,
+    transcript: params.transcript,
   });
 
   const totalClips = clips.length;
@@ -741,6 +817,7 @@ export async function generateFlowVideoScript(
     visualStyle: params.visualStyle,
     characters: (clips as any)?.characters || undefined,
     backgrounds: (clips as any)?.backgrounds || undefined,
+    storyPlan: (clips as any)?.storyPlan || undefined,
     hasNarration: scriptHasNarration,
     totalClips,
     totalDurationSec,

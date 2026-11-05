@@ -17,6 +17,10 @@ export const XHotPipelineOptionsSchema = z.object({
   explainerEngine: z.enum(['firefox', 'chromium']).default('chromium'),
   explainerFps: z.number().int().min(10).max(60).default(30),
   explainerSubtitles: z.boolean().default(false),
+  /** Explainer video style (effects) document: JSON path or `preset:<name>`. */
+  explainerStyle: z.string().optional(),
+  /** Force one clip transition shader for the explainer video. */
+  explainerTransition: z.string().optional(),
   explainerConcurrency: z.number().int().min(1).max(8).optional(),
   // Backward compatibility options
   tutorialEngine: z.enum(['firefox', 'chromium']).optional(),

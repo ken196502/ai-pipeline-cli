@@ -55,6 +55,33 @@ export function parseTweetViews(text?: string | null): number {
   return Math.round(num);
 }
 
+/**
+ * Ensures the search query has an explicit language restriction.
+ * Defaults to `lang:en` if no `lang:` modifier is already specified.
+ */
+export function normalizeSearchQuery(keyword: string): string {
+  const trimmed = keyword.trim();
+  if (!trimmed) return trimmed;
+  if (/\blang:\w+/i.test(trimmed)) {
+    return trimmed;
+  }
+  return `${trimmed} lang:en`;
+}
+
+async function waitForTweets(browser: Browser, timeoutMs = 8000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const count = await browser.execute(() => document.querySelectorAll('article[data-testid="tweet"]').length);
+      if (count > 0) return true;
+    } catch {
+      // ignore
+    }
+    await browser.pause(600);
+  }
+  return false;
+}
+
 export async function scrapeTweetsForKeywords(
   browser: Browser,
   _driver: FirefoxBiDiDriver,
@@ -72,8 +99,9 @@ export async function scrapeTweetsForKeywords(
   // re-logged) on every iteration, which stalls the sweep.
   const seenTweetIds = new Set<string>();
 
-  for (const keyword of options.keywords) {
-    console.log(`\n🔍 Searching X for keyword: "${keyword}" (target: ${options.tweetsPerKeyword} valid posts with links/articles)...`);
+  for (const rawKeyword of options.keywords) {
+    const keyword = normalizeSearchQuery(rawKeyword);
+    console.log(`\n🔍 Searching X for query: "${keyword}" (target: ${options.tweetsPerKeyword} valid posts with links/articles)...`);
     let collectedForThisKeyword = 0;
     const maxScrolls = Math.max(12, Math.ceil(options.tweetsPerKeyword * 0.75) + 8);
 
@@ -98,7 +126,13 @@ export async function scrapeTweetsForKeywords(
 
       console.log(pc.dim(`  → [${keyword}] ${feedLabel} 流: ${searchUrl}`));
       await browser.url(searchUrl);
-      await browser.pause(4500);
+      const loaded = await waitForTweets(browser, 8000);
+      if (!loaded) {
+        console.log(pc.yellow(`  ⚠ [${keyword}] ${feedLabel} 流未即时渲染出推文，继续进入滚动检查`));
+      } else {
+        // Small buffer to ensure first tweet data/aria attributes are fully hydrated
+        await browser.pause(1000);
+      }
 
       let scrollCount = 0;
       while (collectedForThisKeyword < options.tweetsPerKeyword && scrollCount < maxScrolls) {
@@ -159,12 +193,22 @@ export async function scrapeTweetsForKeywords(
             // ignore
           }
 
-          // 4. Extract tweet text
+          // 4. Extract tweet text (support both standard tweets and native X Articles)
           let text = '';
           try {
             const tweetTextEl = await article.$('[data-testid="tweetText"]', { strict: false });
             if (tweetTextEl && (await tweetTextEl.isExisting())) {
               text = await tweetTextEl.getText();
+            } else {
+              // Native X Articles often do NOT use [data-testid="tweetText"] for their title/preview.
+              // Extract from article container text by removing user header and metric tails.
+              const rawText = await article.execute((el) => {
+                const clone = el.cloneNode(true) as HTMLElement;
+                // remove user-name, analytics, social context
+                clone.querySelectorAll('[data-testid="User-Name"], [data-testid="socialContext"], a[href*="/analytics"]').forEach((n) => n.remove());
+                return clone.innerText || '';
+              });
+              text = rawText.replace(/\n+/g, ' ').trim();
             }
           } catch {
             // ignore
@@ -332,7 +376,7 @@ export async function scrapeTweetsForKeywords(
 
         if (collectedForThisKeyword < options.tweetsPerKeyword) {
           await browser.execute(() => window.scrollBy(0, 1800));
-          await browser.pause(2500);
+          await browser.pause(1200);
         }
       }
 

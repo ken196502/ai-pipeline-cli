@@ -39,11 +39,34 @@ export async function convertMarkdownToStandaloneHtml(
     }
   }
 
-  // 2. Parse Markdown to HTML
-  const bodyHtml = await marked.parse(processedMarkdown);
+  // 2. Protect raw <svg>...</svg> blocks from marked markdown-block parsing corruption.
+  // Marked treats indented lines after blank lines inside raw HTML as code blocks (<pre><code>),
+  // which destroys the SVG syntax. We extract SVGs into placeholders and restore them after parsing.
+  const svgBlocks: string[] = [];
+  const svgPlaceholderPrefix = '<!--RAW_SVG_BLOCK_HOLDER_';
+  processedMarkdown = processedMarkdown.replace(/<svg[\s\S]*?<\/svg>/gi, (match) => {
+    svgBlocks.push(match);
+    return `\n\n${svgPlaceholderPrefix}${svgBlocks.length - 1}-->\n\n`;
+  });
+
+  // 3. Parse Markdown to HTML
+  let bodyHtml = await marked.parse(processedMarkdown);
+
+  // Restore raw SVG blocks without any wrapping <pre> or <p> tags
+  for (let i = 0; i < svgBlocks.length; i++) {
+    const placeholder = `${svgPlaceholderPrefix}${i}-->`;
+    // Clean up potential paragraph wrappers created around HTML comments
+    const pWrapped = new RegExp(`<p>\\s*${placeholder}\\s*<\\/p>`, 'g');
+    if (pWrapped.test(bodyHtml)) {
+      bodyHtml = bodyHtml.replace(pWrapped, svgBlocks[i]);
+    } else {
+      bodyHtml = bodyHtml.replaceAll(placeholder, svgBlocks[i]);
+    }
+  }
+
   const docTitle = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim() || 'Technical Architecture & Engineering Insights';
 
-  // 3. Mobile-first responsive HTML layout
+  // 4. Mobile-first responsive HTML layout
   return `<!DOCTYPE html>
 <html lang="en">
 <head>

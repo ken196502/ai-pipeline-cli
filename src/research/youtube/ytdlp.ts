@@ -92,6 +92,8 @@ export interface YtDlpDownloadOptions {
   videoId: string;
   outputDir: string;
   format?: string;
+  /** When true, download video track only without audio (ideal when transcript/subtitles are already available). */
+  videoOnly?: boolean;
   cookiePath?: string | null;
   proxyUrl?: string | null;
   timeoutMs?: number;
@@ -578,12 +580,19 @@ export async function downloadTranscript(
 }
 
 export const DEFAULT_DOWNLOAD_FORMAT =
-  'bestvideo[height<=720][vcodec^=avc1]+bestaudio[acodec^=mp4a]/' +
-  'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/' +
-  'best[height<=720][ext=mp4]/' +
-  'bestvideo[height<=1080][vcodec^=avc1]+bestaudio[ext=m4a]/' +
-  'bestvideo[height<=1080]+bestaudio/' +
-  'best[height<=1080]/' +
+  'bestvideo[height<=1080][height>=720][vcodec^=avc1]+bestaudio/' +
+  'bestvideo[height<=1080][height>=720]+bestaudio/' +
+  'bestvideo[height>=720]+bestaudio/' +
+  'best[height>=720]/' +
+  'bestvideo+bestaudio/' +
+  'best';
+
+export const VIDEO_ONLY_DOWNLOAD_FORMAT =
+  'bestvideo[height<=1080][height>=720][vcodec^=avc1]/' +
+  'bestvideo[height<=1080][height>=720]/' +
+  'bestvideo[height>=720]/' +
+  'best[height>=720]/' +
+  'bestvideo/' +
   'best';
 
 /**
@@ -648,9 +657,9 @@ export async function ensurePlayableH264Video(filePath: string): Promise<string>
   }
 
   const isH264 = probeData.codec_name === 'h264';
-  const isCappedResolution = (probeData.height || 0) <= 720;
+  const isTargetResolution = (probeData.height || 0) <= 1080 && (probeData.height || 0) >= 720;
 
-  if (isH264 && isCappedResolution && filePath.endsWith('.mp4')) {
+  if (isH264 && isTargetResolution && filePath.endsWith('.mp4')) {
     return filePath;
   }
 
@@ -669,9 +678,9 @@ export async function ensurePlayableH264Video(filePath: string): Promise<string>
       await execFileAsync(ffmpegBin, [
         '-y',
         '-i', filePath,
-        '-vf', "scale='min(1280,iw)':-2",
+        '-vf', "scale='min(1920,iw)':-2",
         '-c:v', 'h264_videotoolbox',
-        '-b:v', '1500k',
+        '-b:v', '2500k',
         '-c:a', 'aac',
         '-b:a', '128k',
         tempPath,
@@ -687,10 +696,10 @@ export async function ensurePlayableH264Video(filePath: string): Promise<string>
       await execFileAsync(ffmpegBin, [
         '-y',
         '-i', filePath,
-        '-vf', "scale='min(1280,iw)':-2",
+        '-vf', "scale='min(1920,iw)':-2",
         '-c:v', 'libx264',
         '-preset', 'veryfast',
-        '-crf', '24',
+        '-crf', '22',
         '-c:a', 'aac',
         '-b:a', '128k',
         tempPath,
@@ -717,11 +726,14 @@ export async function downloadVideo(options: YtDlpDownloadOptions): Promise<stri
   const {
     videoId,
     outputDir,
-    format = DEFAULT_DOWNLOAD_FORMAT,
+    videoOnly = false,
+    format,
     cookiePath,
     proxyUrl,
     timeoutMs = 300_000,
   } = options;
+
+  const resolvedFormat = format || (videoOnly ? VIDEO_ONLY_DOWNLOAD_FORMAT : DEFAULT_DOWNLOAD_FORMAT);
 
   const validId = extractVideoId(videoId);
   if (!validId) {
@@ -741,12 +753,11 @@ export async function downloadVideo(options: YtDlpDownloadOptions): Promise<stri
   const args = [
     ...buildBaseArgs(cookiePath, proxyUrl),
     ...(await resolveJsRuntimesArg(binary)),
-    // `web` is the only client that yields downloadable formats on this egress
-    // once the PO token provider + EJS solver are in place. The other clients
-    // are bot-walled or expose no media formats at all.
-    '--extractor-args', 'youtube:player_client=web',
+    // Use multi-client combination (web,web_embedded,tv) so 720p/1080p DASH tracks
+    // and formats are exposed rather than being artificially restricted to 360p.
+    '--extractor-args', 'youtube:player_client=web,web_embedded,tv',
     '-f',
-    format,
+    resolvedFormat,
     '--merge-output-format',
     'mp4',
     '-o',

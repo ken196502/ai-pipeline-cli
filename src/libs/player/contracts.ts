@@ -18,7 +18,14 @@
  *   - Keyframe / Screenshot: e.g. "clip-001-image", "browser-step-001", "channel-avatar"
  *   - Lucide icon: e.g. "film", "sparkles", "code", "shapes"
  *   - Chart keyword: "bars", "line", "donut"
+ *   - Component reference: "component:flash", "component:final-showcase"
  *   - Or explicit descriptor: { kind: 'video' | 'image' | 'icon' | 'chart', ... }
+ *
+ * CONTENT / EFFECT SEPARATION (see Docs/plan-explainer-video-style-and-webgl.md):
+ * the storyboard is CONTENT ONLY. Colours, fonts, durations, cameras and
+ * transitions live in style.json (`./style.js`). Effect fields are rejected by
+ * `buildExplainerStoryboardSchema` and migrated out by
+ * `migrateLegacyStoryboard()`.
  */
 import { z } from 'zod';
 
@@ -44,6 +51,8 @@ export const ExplainerAssetSchema = z.object({
   clipIndex: z.number().int().positive().optional(),
   /** Set when the asset is derived from another generated artifact. */
   derivedFrom: z.enum(['video-first-frame', 'browser-step']).optional(),
+  /** Selector tags used by style components (e.g. `candidate` for `component:flash`). */
+  tags: z.array(z.string()).optional(),
   durationSec: z.number().positive().optional(),
   width: z.number().int().positive().optional(),
   height: z.number().int().positive().optional(),
@@ -69,11 +78,20 @@ export const ExplainerMetaSchema = z.object({
   subtitle: z.string().optional(),
   subtitles: z.boolean().default(false),
   design: ExplainerMetaDesignSchema.default({ w: 1920, h: 1080 }),
+  /**
+   * @deprecated effect field — migrated into style.theme.bg by migrateLegacyStoryboard().
+   * Ignored by the player, which always reads the resolved style.
+   */
   bg: z.string().default('#0A0A0B'),
+  /** @deprecated effect field — style.theme.accent. */
   accent: z.string().default('#FF4D12'),
+  /** @deprecated effect field — style.theme.font. */
   font: z.string().default('"D-DIN Exp", "D-DIN", Inter, "Segoe UI", system-ui, -apple-system, sans-serif'),
+  /** @deprecated effect field — style.timing.shotDur. */
   shotDur: z.number().positive().default(4.2),
+  /** @deprecated effect field — style.timing.shotTrans. */
   shotTrans: z.number().positive().default(0.8),
+  /** @deprecated effect field — style.timing.clipTrans. */
   clipTrans: z.number().positive().default(1.0),
 });
 export type ExplainerMeta = z.infer<typeof ExplainerMetaSchema>;
@@ -146,6 +164,7 @@ export const ExplainerShotSchema = z.object({
   id: z.string().min(1),
   elements: z.array(ExplainerElementSchema).min(1),
   narration: z.array(z.string().min(1)).min(1),
+  /** @deprecated effect field — style.camera / style.overrides["shot:<id>"].camera. */
   camera: ExplainerCameraSchema.optional(),
   /** Timeline computed start time (seconds). */
   vStart: z.number().optional(),
@@ -163,6 +182,7 @@ export const ExplainerClipSchema = z.object({
   kicker: z.string().optional(),
   title: z.string().min(1),
   subtitle: z.string().optional(),
+  /** @deprecated effect field — style.overrides["clip:<id>"].theme.bg. */
   bg: z.string().default('#0A0A0B'),
   shots: z.array(ExplainerShotSchema).min(1),
   /** Timeline computed start time (seconds). */
@@ -222,6 +242,12 @@ export interface ExplainerVoiceLine {
   aDur: number;
   chars?: Array<{ c: string; t: number }>;
   words?: ExplainerVoiceWord[];
+  /** On-screen element phrase (a verbatim excerpt of `text`). */
+  phrase?: string;
+  /** Absolute time the voice starts speaking `phrase` (falls back to aStart). */
+  pStart?: number;
+  /** Absolute time the voice finishes speaking `phrase`. */
+  pEnd?: number;
 }
 export type TutorialVoiceLine = ExplainerVoiceLine;
 
@@ -357,12 +383,21 @@ export function buildExplainerStoryboardSchema(params: {
 
   const visualRefined = ExplainerVisualRefSchema.superRefine((val, ctx) => {
     if (typeof val === 'string') {
+      if (val.startsWith('component:')) {
+        if (val !== 'component:flash' && val !== 'component:final-showcase') {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `unknown component "${val}" — must be component:flash or component:final-showcase`,
+          });
+        }
+        return;
+      }
       if (chartSet.has(val) || params.assetIds.has(val) || params.iconNames.has(val)) {
         return;
       }
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: `unknown visual reference "${val}" — must be a generated material id (video/image/screenshot), a lucide icon name, or a chart (bars/line/donut)`,
+        message: `unknown visual reference "${val}" — must be a generated material id (video/image/screenshot), a lucide icon name, a chart (bars/line/donut), or component:flash / component:final-showcase`,
       });
       return;
     }
@@ -413,12 +448,13 @@ export function buildExplainerStoryboardSchema(params: {
       id: z.string().min(1),
       elements: z.array(elementSchema).min(1, 'shot must carry at least 1 element'),
       narration: z.array(z.string().min(1)).min(1, 'shot must carry spoken narration matching elements'),
-      camera: ExplainerCameraSchema.optional(),
     })
-    .passthrough()
+    .strict()
     .superRefine((shot, ctx) => {
+      // .strict() already rejects unknown keys; timing fields are called out
+      // explicitly so the repair prompt gets an actionable message.
       const raw = shot as any;
-      for (const banned of ['duration', 'durationSec', 'minDurationSec', 'startSec', 'endSec']) {
+      for (const banned of ['duration', 'durationSec', 'minDurationSec', 'startSec', 'endSec', 'vStart', 'vDur', 'vLines']) {
         if (raw[banned] !== undefined) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
@@ -435,13 +471,12 @@ export function buildExplainerStoryboardSchema(params: {
       kicker: z.string().optional(),
       title: z.string().min(1, 'clip title is required'),
       subtitle: z.string().optional(),
-      bg: z.string().default('#0A0A0B'),
       shots: z.array(shotSchema).min(1, 'clip must carry at least 1 shot'),
     })
-    .passthrough()
+    .strict()
     .superRefine((clip, ctx) => {
       const raw = clip as any;
-      for (const banned of ['duration', 'durationSec', 'startSec', 'endSec']) {
+      for (const banned of ['duration', 'durationSec', 'startSec', 'endSec', 'vStart', 'vDur']) {
         if (raw[banned] !== undefined) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
@@ -452,11 +487,209 @@ export function buildExplainerStoryboardSchema(params: {
       }
     });
 
-  return ExplainerStoryboardSchema.extend({
+  const baseSchema = ExplainerStoryboardSchema.extend({
+    meta: ExplainerMetaSchema.partial().strict().transform((meta) => ExplainerMetaSchema.parse(meta)),
     clips: z.array(clipSchema).min(1, 'storyboard must carry at least 1 clip'),
-  }) as z.ZodType<ExplainerStoryboard, z.ZodTypeDef, unknown>;
+  });
+
+  // Reject effect fields up-front (on the RAW payload) so the failure message is
+  // actionable: "move it to style.json" instead of a generic unknown-key error.
+  return z
+    .any()
+    .superRefine((raw, ctx) => {
+      for (const field of collectStoryboardEffectFields(raw)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `effect field "${field}" is banned from the storyboard — colours, fonts, durations, cameras and transitions belong to style.json`,
+        });
+      }
+    })
+    .pipe(baseSchema) as unknown as z.ZodType<ExplainerStoryboard, z.ZodTypeDef, unknown>;
 }
 export const buildTutorialStoryboardSchema = buildExplainerStoryboardSchema;
+
+// ==========================================
+// Content / effect separation helpers
+// ==========================================
+
+const META_EFFECT_FIELDS = ['bg', 'accent', 'font', 'shotDur', 'shotTrans', 'clipTrans'] as const;
+const TIMING_EFFECT_FIELDS = [
+  'duration',
+  'durationSec',
+  'minDurationSec',
+  'startSec',
+  'endSec',
+  'vStart',
+  'vDur',
+  'vLines',
+] as const;
+
+/**
+ * Lists every effect field present in a raw storyboard payload (dotted paths).
+ * Used both to reject LLM output and to drive legacy migration.
+ */
+export function collectStoryboardEffectFields(raw: unknown): string[] {
+  const found: string[] = [];
+  if (!raw || typeof raw !== 'object') return found;
+  const root = raw as any;
+
+  const meta = root.meta;
+  if (meta && typeof meta === 'object') {
+    for (const field of META_EFFECT_FIELDS) {
+      if (meta[field] !== undefined) found.push(`meta.${field}`);
+    }
+  }
+
+  const clips = Array.isArray(root.clips) ? root.clips : [];
+  clips.forEach((clip: any, ci: number) => {
+    if (!clip || typeof clip !== 'object') return;
+    const clipPath = `clips[${ci}]`;
+    if (clip.bg !== undefined) found.push(`${clipPath}.bg`);
+    for (const field of TIMING_EFFECT_FIELDS) {
+      if (clip[field] !== undefined) found.push(`${clipPath}.${field}`);
+    }
+    const shots = Array.isArray(clip.shots) ? clip.shots : [];
+    shots.forEach((shot: any, si: number) => {
+      if (!shot || typeof shot !== 'object') return;
+      const shotPath = `${clipPath}.shots[${si}]`;
+      if (shot.camera !== undefined) found.push(`${shotPath}.camera`);
+      for (const field of TIMING_EFFECT_FIELDS) {
+        if (shot[field] !== undefined) found.push(`${shotPath}.${field}`);
+      }
+    });
+  });
+
+  return found;
+}
+
+/**
+ * Storyboard *content* schema without material/icon binding: strips effect
+ * fields (with a warning) instead of rejecting them. This is the schema used to
+ * read older storyboards and hand-authored scripts.
+ */
+export const StoryboardContentSchema: z.ZodType<ExplainerStoryboard, z.ZodTypeDef, unknown> =
+  ExplainerStoryboardSchema.extend({
+    clips: z.array(
+      ExplainerClipSchema.extend({
+        shots: z.array(
+          ExplainerShotSchema.omit({ camera: true, vStart: true, vDur: true, vLines: true })
+        ).min(1),
+      }).omit({ bg: true, vStart: true, vDur: true })
+    ).min(1),
+  }) as unknown as z.ZodType<ExplainerStoryboard, z.ZodTypeDef, unknown>;
+
+/**
+ * Returns a deep copy of a storyboard with every effect field removed.
+ *
+ * Parsing with `StoryboardContentSchema` re-applies the deprecated defaults
+ * (meta.bg / meta.accent / …), so anything written to disk must go through this
+ * helper to keep the on-disk storyboard content-only.
+ */
+export function storyboardForDisk(storyboard: unknown): Record<string, any> {
+  return stripEffectFields(storyboard);
+}
+
+function stripEffectFields(raw: any): any {
+  const out = JSON.parse(JSON.stringify(raw ?? {}));
+  if (out.meta && typeof out.meta === 'object') {
+    for (const field of META_EFFECT_FIELDS) delete out.meta[field];
+  }
+  for (const clip of Array.isArray(out.clips) ? out.clips : []) {
+    if (!clip || typeof clip !== 'object') continue;
+    delete clip.bg;
+    for (const field of TIMING_EFFECT_FIELDS) delete clip[field];
+    for (const shot of Array.isArray(clip.shots) ? clip.shots : []) {
+      if (!shot || typeof shot !== 'object') continue;
+      delete shot.camera;
+      for (const field of TIMING_EFFECT_FIELDS) delete shot[field];
+    }
+  }
+  return out;
+}
+
+export interface MigratedStoryboard {
+  storyboard: ExplainerStoryboard;
+  /** Style patch carrying every effect field that was migrated out. */
+  stylePatch: Record<string, any>;
+  /** Dotted paths of the migrated fields (for logging/tests). */
+  migratedFields: string[];
+}
+
+/**
+ * Migrates a legacy storyboard (effect fields inline) into content + style patch.
+ *
+ *   meta.bg / meta.accent / meta.font      → theme.bg / theme.accent / theme.font
+ *   meta.shotDur / shotTrans / clipTrans   → timing.*
+ *   clip.bg                                → overrides["clip:<id>"].theme.bg
+ *   shot.camera                            → overrides["shot:<id>"].camera (+ camera.mode='script')
+ */
+export function migrateLegacyStoryboard(raw: unknown): MigratedStoryboard {
+  const migratedFields = collectStoryboardEffectFields(raw);
+  const root = (raw && typeof raw === 'object' ? raw : {}) as any;
+  const stylePatch: Record<string, any> = {};
+
+  const meta = root.meta && typeof root.meta === 'object' ? root.meta : {};
+  const theme: Record<string, any> = {};
+  if (meta.bg !== undefined) theme.bg = meta.bg;
+  if (meta.accent !== undefined) theme.accent = meta.accent;
+  if (meta.font !== undefined) theme.font = meta.font;
+  if (Object.keys(theme).length > 0) stylePatch.theme = theme;
+
+  const timing: Record<string, any> = {};
+  if (meta.shotDur !== undefined) timing.shotDur = meta.shotDur;
+  if (meta.shotTrans !== undefined) timing.shotTrans = meta.shotTrans;
+  if (meta.clipTrans !== undefined) timing.clipTrans = meta.clipTrans;
+  if (Object.keys(timing).length > 0) stylePatch.timing = timing;
+
+  const overrides: Record<string, any> = {};
+  let cameraMigrated = false;
+  for (const clip of Array.isArray(root.clips) ? root.clips : []) {
+    if (!clip || typeof clip !== 'object') continue;
+    if (clip.bg !== undefined && clip.id) {
+      overrides[`clip:${clip.id}`] = { theme: { bg: clip.bg } };
+    }
+    for (const shot of Array.isArray(clip.shots) ? clip.shots : []) {
+      if (!shot || typeof shot !== 'object' || shot.camera === undefined || !shot.id) continue;
+      const camera = { ...shot.camera };
+      // A script-authored camera keeps its exact values (mode 'script').
+      overrides[`shot:${shot.id}`] = { camera: { mode: 'script', ...camera } };
+      cameraMigrated = true;
+    }
+  }
+  if (Object.keys(overrides).length > 0) stylePatch.overrides = overrides;
+  if (cameraMigrated) stylePatch.camera = { mode: 'script' };
+
+  const storyboard = StoryboardContentSchema.parse(stripEffectFields(root));
+  return { storyboard, stylePatch, migratedFields };
+}
+
+/**
+ * Attaches voice.json timings onto a timeline copy (in memory only).
+ * TTS no longer mutates the storyboard, so consumers that need vStart/vDur
+ * (visual QA, contact-sheet grids) call this instead.
+ */
+export function attachVoiceTimings(timeline: ExplainerTimeline): ExplainerTimeline {
+  const voice = timeline.voice;
+  if (!voice || !Array.isArray(voice.clips)) return timeline;
+
+  const clips = (timeline.clips || []).map((clip, ci) => {
+    const voiceClip = voice.clips[ci];
+    if (!voiceClip) return clip;
+    const shots = (clip.shots || []).map((shot, si) => {
+      const voiceShot = voiceClip.shots[si];
+      if (!voiceShot) return shot;
+      return {
+        ...shot,
+        vStart: voiceShot.start,
+        vDur: voiceShot.dur,
+        vLines: voiceShot.lines,
+      };
+    });
+    return { ...clip, vStart: voiceClip.start, vDur: voiceClip.dur, shots };
+  });
+
+  return { ...timeline, clips };
+}
 
 // ==========================================
 // Coverage & Validation Checks

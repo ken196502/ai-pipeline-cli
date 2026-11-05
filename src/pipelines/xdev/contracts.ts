@@ -98,6 +98,7 @@ export interface XDevPipelineResult {
   xArticleEditUrl?: string;
   xArticleScreenshots?: string[];
   grokResponsePath?: string;
+  creativeSparksPath?: string;
   stages: StageResult[];
   error?: string;
 

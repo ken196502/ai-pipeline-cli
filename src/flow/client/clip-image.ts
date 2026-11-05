@@ -202,6 +202,7 @@ export async function generateClipImage(
       await new Promise((r) => setTimeout(r, randomDelay(1, 2.5)));
 
       console.log(pc.cyan(`[flow-cli] ${opts.label}: submitting image generation request via Enter...`));
+      const submittedAt = Date.now();
       const submitVia = await submitPrompt(page);
       console.log(pc.gray(`[flow-cli] ${opts.label}: image prompt submitted via ${submitVia}`));
       await captureEvidence(page, '03-image-generate-clicked', ctx.config.debugDir);
@@ -214,7 +215,11 @@ export async function generateClipImage(
       console.log(pc.green(`✓ ${opts.label}: image generation queued. Awaiting synthesis...`));
 
       // Wait for the NEW image card by identity (video cards are never returned).
-      const newTile = await waitForNewImageTile(page, knownImageKeys, opts.timeoutMs ?? 120_000, failureBaseline);
+      // The ledger excludes every media this run already consumed; `submittedAt` rejects
+      // cards that were already rendered before this generation could possibly finish.
+      const newTile = await waitForNewImageTile(page, knownImageKeys, opts.timeoutMs ?? 120_000, failureBaseline, {
+        submittedAt,
+      });
       console.log(pc.green(`✓ ${opts.label}: new image card created on canvas`));
       await captureEvidence(page, '04-image-tile-ready', ctx.config.debugDir);
 

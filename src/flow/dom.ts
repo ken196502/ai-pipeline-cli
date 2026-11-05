@@ -4363,13 +4363,24 @@ export async function waitForAnimateEditor(
  * new card is detected by identity; a plain number is treated as the baseline image
  * card count (see `countImageTiles`). Video cards are never returned — a right-click
  * on a video card must be impossible by construction.
+ *
+ * `guard.submittedAt` is the wall-clock time the prompt was submitted. A card that is
+ * already rendered a few hundred ms after submission cannot be the result of that
+ * submission (a real Flow image takes tens of seconds), so accepting it would silently
+ * hand back previously generated media (observed: clip 6 reusing clip 5's keyframes).
  */
 export async function waitForNewImageTile(
   page: Page,
   baseline: number | Set<string>,
   timeoutMs: number = 180_000,
-  failureBaseline?: FlowFailureState
+  failureBaseline?: FlowFailureState,
+  guard?: { submittedAt?: number; minGenerationMs?: number }
 ): Promise<FlowImageTile> {
+  const minGenerationMs = guard?.minGenerationMs ?? 3_000;
+  const submittedAt = guard?.submittedAt ?? null;
+  const tooEarly = (): boolean =>
+    submittedAt !== null && Date.now() - submittedAt < minGenerationMs;
+
   const deadline = Date.now() + timeoutMs;
   let pollCount = 0;
   let lastRefresh = Date.now();
@@ -4523,7 +4534,9 @@ export async function waitForNewImageTile(
 
     const state = await checkState();
     if (state.ready && state.card) {
-      return state.card as FlowImageTile;
+      if (!tooEarly()) return state.card as FlowImageTile;
+      // A card that is already rendered immediately after submission is stale media,
+      // not the result of this generation — keep polling for the real new card.
     }
 
     // Periodic force-refresh to sync server-side image generation if frontend DOM has stalled
@@ -4541,7 +4554,7 @@ export async function waitForNewImageTile(
           await new Promise((r) => setTimeout(r, 3000));
           await scrollToBottomToLoadAll(page, { maxScrolls: 5, timeoutMs: 5_000 }).catch(() => {});
           const refreshedState = await checkState();
-          if (refreshedState.ready && refreshedState.card) {
+          if (refreshedState.ready && refreshedState.card && !tooEarly()) {
             console.log(picocolors.green('[flow-dom] Rescued new image card after page synchronization!'));
             return refreshedState.card as FlowImageTile;
           }

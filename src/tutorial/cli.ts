@@ -26,7 +26,7 @@ import { RunContext } from '../run/index.js';
 import { tutorialParamsFromRun, createTutorialFromRun } from './run.js';
 import { captureBrowserStepShots, parseBrowserStepScript } from './step-shots.js';
 import { captureGeminiShots } from './ui-shots.js';
-import { runTutorialVisualQa } from './qa.js';
+import { runExplainerVisualQa } from '../libs/player/qa.js';
 import { exitAfterFlush } from '../utils/shutdown.js';
 import { sendMsg, notifyError, formatDetailedErrorMessage } from '../utils/send_msg.js';
 import type { TutorialClipOutputRef } from './assets.js';
@@ -210,12 +210,14 @@ export async function handleTutorialCommand(opts: any): Promise<TutorialGenerati
     await run.configure({ narrationLang: opts.lang, ttsVoice: opts.voice, ttsRate: opts.rate,
       tutorialFps: opts.fps, tutorialSize: size, maxTutorialScenes: opts.maxScenes,
       tutorialSubtitles: opts.subtitles, tutorialEngine: opts.engine,
-      cookiePath: opts.cookiePath, model: opts.model, browserPath: opts.browserPath });
+      cookiePath: opts.cookiePath, model: opts.model, browserPath: opts.browserPath,
+      tutorialStyle: opts.style, tutorialTransition: opts.transition });
     try {
       const summary = await createTutorialFromRun(run, {
         previewOnly: opts.previewOnly, skipChannelLookup: opts.skipChannelLookup,
         browserStepsDir: opts.browserSteps, geminiShotsDir: opts.geminiShots,
         crf: opts.crf, preset: opts.preset,
+        style: opts.style, transition: opts.transition,
         onProgress: (stage, message) => console.log(`   ${stage}: ${message}`),
       });
       await run.finish();
@@ -269,8 +271,10 @@ export async function handleTutorialCommand(opts: any): Promise<TutorialGenerati
       cookiePath: opts.cookiePath,
       crf: opts.crf,
       preset: opts.preset,
+      style: opts.style,
+      transition: opts.transition,
       model: opts.model,
-      engine: opts.engine || 'firefox',
+      engine: opts.engine || 'chromium',
       browserPath: opts.browserPath,
       onProgress: (stage, message) => {
         console.log(`   ${pc.dim('•')} ${pc.bold(stage)}: ${message}`);
@@ -308,19 +312,33 @@ export function buildTutorialCommand(): Command {
     .option('--subtitles', 'Enable narration subtitles / captions in the tutorial video (default: off)', false)
     .option('--no-subtitles', 'Disable subtitles, overriding the saved setting')
     .option('--engine <engine>', 'Render engine for tutorial video (firefox, chromium)', 'chromium')
+    .option('--style <path|preset:name>', 'Style (effects) document: JSON path or preset:ember-dark|cyan-tech|apple-clean')
+    .option('--transition <name>', 'Force one clip transition shader (directionalWarp, lumaGlitch, radialBloom, crossZoom, dreamyZoom, displacement, emberBurn)')
     .option('--browser-path <path>', 'Custom Ungoogled Chromium executable path (when engine is chromium)')
     .option('--preview-only', 'Generate narration and HTML preview without rendering video', false)
     .option('--rebuild', 'Rebuild the player bundle and re-render from an existing tutorial/tutorial.json (no LLM/TTS)', false)
     .option('--qa', 'Run the automated visual QA on an existing tutorial bundle (screenshots + layout checks)', false)
     .option('--qa-samples <n>', 'QA sample frames per scene', (v) => parseInt(v, 10), 4)
     .action(async (opts, command) => {
+      // Kept in scope so `--rebuild` can record its own stage: a rebuild used to
+      // leave run.json showing `tutorial-gen: failed` even after the video was
+      // successfully re-rendered, so every consumer (report, notify, CI) kept
+      // reporting a failure that no longer existed.
+      let runContext: RunContext | null = null;
       if (opts.run) {
         if (opts.artifacts) throw new Error('Choose --run or --artifacts.');
         const run = await RunContext.open(opts.run);
+        runContext = run;
         opts.artifacts = run.outDir;
         // Commander defaults must not override settings already stored in the run.
         for (const key of ['rate', 'fps', 'size', 'maxScenes', 'cookiePath', 'subtitles', 'engine']) {
           if (command.getOptionValueSource(key) === 'default') delete opts[key];
+        }
+        // The run recorded the engine it rendered with; without this, `--rebuild`
+        // fell through to a hardcoded 'firefox' that is not even installed here.
+        if (!opts.engine) {
+          const recorded = (await run.snapshot()).config?.tutorialEngine;
+          if (recorded === 'firefox' || recorded === 'chromium') opts.engine = recorded;
         }
       }
       if (!opts.artifacts) throw new Error('Provide --artifacts <dir> or --run <run.json>');
@@ -328,9 +346,9 @@ export function buildTutorialCommand(): Command {
       if (opts.qa) {
         const tutorialDir = path.join(artifactsDir, 'tutorial');
         console.log(pc.bold(pc.cyan('\n🔍 TUTORIAL VISUAL QA\n')));
-        const result = await runTutorialVisualQa({
+        const result = await runExplainerVisualQa({
           tutorialDir,
-          engine: opts.engine || 'firefox',
+          engine: opts.engine || 'chromium',
           browserPath: opts.browserPath,
           samplesPerScene: opts.qaSamples,
         });
@@ -353,16 +371,25 @@ export function buildTutorialCommand(): Command {
       }
       if (opts.rebuild) {
         const tutorialDir = path.join(artifactsDir, 'tutorial');
-        const result = await rebuildTutorialBundle({
-          tutorialDir,
-          engine: opts.engine || 'firefox',
-          crf: opts.crf,
-          preset: opts.preset,
-          browserPath: opts.browserPath,
-          onProgress: (stage, message) => {
-            console.log(`   ${pc.dim('•')} ${pc.bold(stage)}: ${message}`);
-          },
-        });
+        const rebuild = () =>
+          rebuildTutorialBundle({
+            tutorialDir,
+            engine: opts.engine || 'chromium',
+            crf: opts.crf,
+            preset: opts.preset,
+            browserPath: opts.browserPath,
+            style: opts.style,
+            transition: opts.transition,
+            onProgress: (stage, message) => {
+              console.log(`   ${pc.dim('•')} ${pc.bold(stage)}: ${message}`);
+            },
+          });
+        const result = runContext ? await runContext.step('tutorial-gen', rebuild) : await rebuild();
+        if (runContext) {
+          // Every stage is complete now, so the run-level status must stop
+          // claiming `failed` on account of the stage this rebuild just redid.
+          await runContext.finish();
+        }
         console.log(pc.bold(pc.green('\n✅ TUTORIAL VIDEO REBUILT\n')));
         console.log(`${pc.bold('Video:')}   ${pc.cyan(result.videoPath)}`);
         console.log(`${pc.bold('Scenes:')}  ${result.timeline.scenes?.length ?? result.timeline.clips?.length ?? 0}`);

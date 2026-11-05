@@ -248,14 +248,12 @@ test('executeXHotPipeline in dry-run mode completes all stages and produces repo
     assert.ok(result.winner?.name.includes('test model'));
     assert.equal(result.topCandidates?.length, 3);
 
-    const reportMdExists = await fs.stat(path.join(tempDir, 'report.md')).then(() => true).catch(() => false);
-    const resultJsonExists = await fs.stat(path.join(tempDir, 'result.json')).then(() => true).catch(() => false);
+    // Reports were unified into FINAL_REPORT.* (commit 0f792b2); the legacy
+    // report.md / result.json artifacts no longer exist.
     const finalReportMdExists = await fs.stat(path.join(tempDir, 'FINAL_REPORT.md')).then(() => true).catch(() => false);
     const finalReportHtmlExists = await fs.stat(path.join(tempDir, 'FINAL_REPORT.html')).then(() => true).catch(() => false);
     const finalReportJsonExists = await fs.stat(path.join(tempDir, 'final-report.json')).then(() => true).catch(() => false);
 
-    assert.ok(reportMdExists, 'report.md must be generated');
-    assert.ok(resultJsonExists, 'result.json must be generated');
     assert.ok(finalReportMdExists, 'FINAL_REPORT.md must be generated');
     assert.ok(finalReportHtmlExists, 'FINAL_REPORT.html must be generated');
     assert.ok(finalReportJsonExists, 'final-report.json must be generated');

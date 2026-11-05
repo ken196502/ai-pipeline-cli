@@ -26,7 +26,8 @@
     "pipeline:xhot": "tsx src/cli.ts xhot",
     "pipeline:flowTutor": "tsx src/cli.ts flowTutor",
     "build": "tsc",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "tsx --test",
+    "test:all": "tsx --test tests/*.test.ts",
     "test:modules": "tsx --test tests/modules.test.ts",
     "test:pipeline": "tsx --test tests/xhot-pipeline.test.ts",
     "test:runner": "tsx --test tests/runner-24h.test.ts"

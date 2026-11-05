@@ -413,6 +413,13 @@ export const SelectionDecisionSchema = z.object({
       evidenceCoverage: z.number().min(0).max(1),
       viewsPerDay: z.number().nonnegative(),
       selectable: z.boolean(),
+      /** 1-based rank from the vision-language shortlist (1 = primary pick). */
+      rank: z.number().int().min(1).optional(),
+      /**
+       * `primary` is the pick the pipeline works on; `alternate` entries are the
+       * substitutes used when the primary yields no usable prompts/transcript.
+       */
+      role: z.enum(['primary', 'alternate']).optional(),
     }),
   ),
   runnersUp: z

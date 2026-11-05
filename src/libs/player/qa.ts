@@ -2,7 +2,7 @@
  * Automated visual QA for the explainer player (自动视觉质检).
  *
  * Boots the player in the headless render browser (same engine as the final
- * render — local Firefox by default) at the target resolution, seeks a
+ * render — Chromium by default) at the target resolution, seeks a
  * grid of sample timestamps across every scene, takes screenshots and runs
  * programmatic visual checks so layout defects are caught by the build itself
  * instead of by a human reviewer:
@@ -18,7 +18,7 @@ import path from 'node:path';
 import type { Browser, BrowserContext, Page } from 'playwright-core';
 import sharp from 'sharp';
 import { launchRenderBrowser, serveExplainerDir, type ExplainerRenderEngine } from './render.js';
-import type { ExplainerTimeline } from './contracts.js';
+import { attachVoiceTimings, type ExplainerTimeline } from './contracts.js';
 
 export interface ExplainerQAIssue {
   kind:
@@ -67,13 +67,15 @@ export async function runExplainerVisualQa(
   const samplesPerScene = params.samplesPerScene ?? 4;
   await fs.mkdir(shotsDir, { recursive: true });
 
-  const timelineFile = fss.existsSync(path.join(bundleDir, 'explainer.json'))
-    ? path.join(bundleDir, 'explainer.json')
-    : path.join(bundleDir, 'tutorial.json');
+  const timelineFile = path.join(bundleDir, 'explainer.json');
+  if (!fss.existsSync(timelineFile)) {
+    throw new Error(`visual QA needs ${timelineFile} (legacy tutorial.json bundles are no longer supported)`);
+  }
 
-  const timeline = JSON.parse(
-    await fs.readFile(timelineFile, 'utf-8')
-  ) as ExplainerTimeline;
+  // voice.json is the only timing source: attach it in memory for the sample grid.
+  const timeline = attachVoiceTimings(
+    JSON.parse(await fs.readFile(timelineFile, 'utf-8')) as ExplainerTimeline
+  );
 
   const server = await serveExplainerDir(bundleDir);
   let browser: Browser | BrowserContext | null = null;
@@ -94,17 +96,13 @@ export async function runExplainerVisualQa(
     browser = launched.browser;
     const page: Page = launched.page;
 
-    const playerHtmlFilename = fss.existsSync(path.join(bundleDir, 'explainer-player.html'))
-      ? 'explainer-player.html'
-      : 'tutorial-player.html';
+    const playerHtmlFilename = 'explainer-player.html';
 
     await page.goto(`${server.origin}/${playerHtmlFilename}?render=1`, { waitUntil: 'load', timeout: 120_000 });
-    await page.waitForFunction(
-      'window.__explainerReady === true || window.__tutorialReady === true || window.__explainerError || window.__tutorialError',
-      undefined,
-      { timeout: 120_000 }
-    );
-    const bootError = await page.evaluate('window.__explainerError || window.__tutorialError || null');
+    await page.waitForFunction('window.__explainerReady === true || window.__explainerError', undefined, {
+      timeout: 120_000,
+    });
+    const bootError = await page.evaluate('window.__explainerError || null');
     if (bootError) {
       issues.push({ kind: 'blank-frame', detail: `player failed to boot: ${bootError}`, tSec: 0 });
       return { issues, screenshots, checksRun: 1 };
@@ -134,7 +132,7 @@ export async function runExplainerVisualQa(
           const tSec = vStart + vDur * frac;
 
           await page.evaluate((t: number) => {
-            const api = window.__explainer || window.__tutorial;
+            const api = window.__explainer;
             return api!.seek(t);
           }, tSec);
 

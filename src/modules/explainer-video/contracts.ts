@@ -9,6 +9,7 @@ import type {
   TutorialTimeline,
 } from '../../libs/player/contracts.js';
 import type { OpusVoiceTrackResult } from '../../libs/player/tts.js';
+import type { ExplainerStyle, ExplainerStylePatch } from '../../libs/player/style.js';
 import type { XHotEvalResult } from '../evaluation/contracts.js';
 import type { XHotHarvestResult } from '../harvest/contracts.js';
 
@@ -28,6 +29,12 @@ export interface CreateExplainerVideoOptions {
   ttsInstruct?: string;
   browserPath?: string;
   profileDir?: string;
+  /** Pipeline style preset (default 'preset:cyan-tech' for xhot). */
+  stylePreset?: string;
+  /** Extra style: JSON file path or inline style object/patch. */
+  style?: ExplainerStyle | ExplainerStylePatch | string;
+  /** Force one clip transition shader for the whole video. */
+  transition?: string;
   onProgress?: (stage: string, message: string) => void;
 }
 export type CreateXHotVideoOptions = CreateExplainerVideoOptions;
@@ -61,8 +68,21 @@ export interface ExplainerProduceOptions {
   narrationLanguage?: string;
   /** Ready-to-use visual assets (already copied into the assets dir by the caller). */
   assets: ExplainerAsset[];
-  /** LLM-generated storyboard (clips/shots/elements/narration). */
+  /** LLM-generated storyboard (clips/shots/elements/narration — CONTENT ONLY). */
   storyboard: ExplainerStoryboard;
+  /**
+   * Pipeline style preset (default 'preset:ember-dark'). The run-directory
+   * `style.json` and `style` below override it.
+   */
+  stylePreset?: string;
+  /** Extra style: a JSON file path, or an inline style object/patch. */
+  style?: ExplainerStyle | ExplainerStylePatch | string;
+  /** Style patch migrated out of a legacy storyboard (loadStoryboardWithMigration). */
+  storyboardStylePatch?: ExplainerStylePatch;
+  /** Force one clip transition shader for the whole video (CLI --transition). */
+  transition?: string;
+  /** Max concurrent TTS line requests (default 2). */
+  ttsConcurrency?: number;
   fps?: number;
   width?: number;
   height?: number;

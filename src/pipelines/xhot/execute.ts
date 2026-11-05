@@ -245,6 +245,9 @@ export async function executeXHotPipeline(
         ttsVoice: options.ttsVoice,
         ttsRate: options.ttsRate,
         ttsInstruct: options.ttsInstruct,
+        stylePreset: options.explainerStyle?.startsWith('preset:') ? options.explainerStyle : undefined,
+        style: options.explainerStyle && !options.explainerStyle.startsWith('preset:') ? options.explainerStyle : undefined,
+        transition: options.explainerTransition,
         profileDir,
         onProgress: (stg, msg) => notify('x-video', `[${stg}] ${msg}`),
       });

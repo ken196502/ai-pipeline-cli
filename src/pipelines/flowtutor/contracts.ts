@@ -88,6 +88,10 @@ export const FlowTutorPipelineOptionsSchema = z.object({
     .optional(),
   maxTutorialScenes: z.number().int().positive().max(40).default(10),
   tutorialSubtitles: z.boolean().default(false),
+  /** Tutorial video style (effects) document: JSON path or `preset:<name>`. */
+  tutorialStyle: z.string().optional(),
+  /** Force one clip transition shader for the whole tutorial video. */
+  tutorialTransition: z.string().optional(),
   narrationLang: z.string().optional(),
   headed: z.boolean().default(false),
   viewport: z.union([
