@@ -213,6 +213,7 @@ export async function executeXHotPipeline(
       previewCount: 20,
       targetCount: 10,
       outDir,
+      searchLang: options.searchLang,
       onProgress: (m) => notify('x-harvest', m),
     });
     recordStage(

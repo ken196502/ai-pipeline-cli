@@ -39,6 +39,12 @@ export interface HarvestWinnerOptions {
   targetCount?: number;
   outDir: string;
   /**
+   * Language operator appended to the deep-search query when the winner name
+   * itself carries no `lang:xx`. Defaults to `en`; pass `null` to disable
+   * (required for non-English topics).
+   */
+  searchLang?: string | null;
+  /**
    * If true, enables ASR transcription for harvested video assets.
    * Default is true.
    */

@@ -5,6 +5,8 @@ import {
   normalizeSearchQuery,
   buildXSearchUrl,
   parseSearchLangOption,
+  cjkRatio,
+  isCjkDominated,
 } from '../src/libs/text/search-query.js';
 
 test('normalizeSearchQuery appends lang:en by default', () => {
@@ -62,4 +64,26 @@ test('parseSearchLangOption maps CLI values', () => {
   assert.equal(parseSearchLangOption('zh'), 'zh');
   assert.equal(parseSearchLangOption('none'), null);
   assert.equal(parseSearchLangOption('OFF'), null);
+});
+
+test('cjkRatio measures the CJK share of non-space characters', () => {
+  assert.equal(cjkRatio(''), 0);
+  assert.equal(cjkRatio('   '), 0);
+  assert.equal(cjkRatio('OpenAI ships a new model'), 0);
+  assert.equal(cjkRatio('OpenAI 发布了新模型'), 6 / 12);
+  assert.equal(cjkRatio('纯中文正文'), 1);
+  // Emoji / punctuation are not CJK ideographs.
+  assert.equal(cjkRatio('🚀🔥'), 0);
+});
+
+test('isCjkDominated flags Chinese bodies but keeps image-only tweets', () => {
+  assert.equal(isCjkDominated(''), false);
+  assert.equal(isCjkDominated('OpenAI ships a new model'), false);
+  assert.equal(isCjkDominated('OpenAI 发布了新模型，据说是 GPT-6.2'), true);
+  // A stray CJK author name inside an English body stays below the threshold.
+  assert.equal(
+    isCjkDominated('OpenAI GPT-6.2 leaks via 张三 and two other sources, huge release expected soon'),
+    false
+  );
+  assert.equal(isCjkDominated('OpenAI 发布了新模型', 0.9), false);
 });

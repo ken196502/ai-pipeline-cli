@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ensureStandardBinaryPaths, resolveYtDlpBinary } from '../../libs/media/ytdlp.js';
 import { transcribeTweetVideo, checkPuterAsrReady } from '../../libs/asr/index.js';
-import { buildXSearchUrl, normalizeSearchQuery } from '../../libs/text/index.js';
+import { buildXSearchUrl, isCjkDominated, normalizeSearchQuery } from '../../libs/text/index.js';
 import type { XHotCandidate } from './contracts.js';
 
 const execFileAsync = promisify(execFile);
@@ -28,7 +28,7 @@ export interface SearchXOptions {
   onProgress?: (msg: string) => void;
 }
 
-export { buildXSearchUrl, normalizeSearchQuery };
+export { buildXSearchUrl, isCjkDominated, normalizeSearchQuery };
 
 
 const TWEET_SELECTOR = 'article[data-testid="tweet"]';
@@ -412,6 +412,12 @@ export async function searchXCandidates(
           if (result.status === 'invalid') {
             report(
               `Tweet ${id} skipped: ${result.reason} (no fallback shot is taken)`
+            );
+            continue;
+          }
+          if (searchLang === 'en' && isCjkDominated(result.candidate.text)) {
+            report(
+              `Tweet ${id} skipped: non-English body (CJK-dominated) [${result.candidate.authorHandle}]`
             );
             continue;
           }

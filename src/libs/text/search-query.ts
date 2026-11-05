@@ -48,6 +48,32 @@ export function parseSearchLangOption(value?: string | null): string | null {
 }
 
 /**
+ * Share of non-space characters that are CJK ideographs.
+ *
+ * X's `lang:en` operator is a heuristic, so mixed-script tweets (English
+ * keyword + Chinese body) still slip into the feed. This is the text-level
+ * backstop used by discovery/harvest to drop them.
+ */
+export function cjkRatio(text: string): number {
+  const trimmed = (text ?? '').trim();
+  if (!trimmed) return 0;
+  const nonSpace = trimmed.replace(/\s+/g, '').length;
+  if (nonSpace === 0) return 0;
+  const cjk = (trimmed.match(/[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/g) || []).length;
+  return cjk / nonSpace;
+}
+
+/**
+ * True when a tweet body reads as non-English (CJK dominated).
+ * Image/video-only tweets (empty text) are never considered CJK-dominated.
+ */
+export function isCjkDominated(text: string, threshold = 0.15): boolean {
+  const ratio = cjkRatio(text);
+  if (ratio === 0) return false;
+  return ratio >= threshold;
+}
+
+/**
  * Builds the `x.com/search` URL for a feed tab, applying the language
  * restriction through {@link normalizeSearchQuery}.
  */

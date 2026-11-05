@@ -7,6 +7,7 @@ import pc from 'picocolors';
 import { ensureStandardBinaryPaths, resolveYtDlpBinary } from '../../libs/media/ytdlp.js';
 import { isPromotedTweet } from '../discovery/search.js';
 import { transcribeTweetVideo, checkPuterAsrReady } from '../../libs/asr/index.js';
+import { buildXSearchUrl, cjkRatio, isCjkDominated, normalizeSearchQuery } from '../../libs/text/index.js';
 import type { XHotHarvestItem, XHotHarvestResult, HarvestWinnerOptions } from './contracts.js';
 import { evaluateTweetRichnessWithVL } from './eval-richness.js';
 
@@ -103,7 +104,14 @@ export async function harvestWinnerTopicMaterials(
   page: Page,
   options: HarvestWinnerOptions
 ): Promise<XHotHarvestResult> {
-  const { winnerName, previewCount = 20, targetCount = 10, outDir, onProgress } = options;
+  const {
+    winnerName,
+    previewCount = 20,
+    targetCount = 10,
+    outDir,
+    searchLang = 'en',
+    onProgress,
+  } = options;
   const materialsDir = path.join(outDir, 'materials');
   const shotsDir = path.join(materialsDir, 'tweets');
   const mediaDir = path.join(materialsDir, 'media');
@@ -119,8 +127,9 @@ export async function harvestWinnerTopicMaterials(
     onProgress?.(msg);
   };
 
-  const searchUrl = `https://x.com/search?q=${encodeURIComponent(winnerName)}&f=top`;
-  report(`Deep searching X for winner topic: "${winnerName}" -> ${searchUrl}`);
+  const effectiveQuery = normalizeSearchQuery(winnerName, { lang: searchLang });
+  const searchUrl = buildXSearchUrl(winnerName, 'top', searchLang);
+  report(`Deep searching X for winner topic: "${effectiveQuery}" -> ${searchUrl}`);
   await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForTimeout(3000);
 
@@ -168,6 +177,15 @@ export async function harvestWinnerTopicMaterials(
 
         const textEl = await tweetEl.$('[data-testid="tweetText"]');
         const text = textEl ? (await textEl.innerText()).trim() : '';
+
+        // Text-level language backstop: X's `lang:en` still lets mixed-script
+        // tweets through, and those end up as Chinese cards inside the video.
+        if (searchLang === 'en' && isCjkDominated(text)) {
+          report(
+            `Skipping non-English tweet [${authorHandle}] (CJK ratio ${(cjkRatio(text) * 100).toFixed(0)}%): ${text.slice(0, 40).replace(/\s+/g, ' ')}...`
+          );
+          continue;
+        }
 
         // Metrics: views, replies, reposts, likes
         const metricOf = async (sel: string) => {
