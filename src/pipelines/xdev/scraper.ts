@@ -12,22 +12,6 @@ export interface KeywordScraperOptions {
   tweetsPerKeyword: number;
   minViews?: number;
   listUrl?: string;
-  /**
-   * Language operator appended to every keyword (`en` by default).
-   * `null` disables it — required for non-English topics.
-   */
-  /**
-   * Language operator appended to every keyword. Default `null` = no operator.
-   *
-   * A/B measured on 2026-11-06 against the real Top feed:
-   *   q=Agent system                 → DeepSeekHarness/2116857257245987236 at #1
-   *   q=Agent system lang:en         → the same post is GONE from the feed
-   * X's lang filter silently removes the top-ranked post of a keyword, so the
-   * default must not apply it. Language control belongs to the material/output
-   * layer (see the article English gate), not to the search query.
-   * `--search-lang en` still opts in, and only then does the CJK backstop run.
-   */
-  searchLang?: string | null;
 }
 
 export interface ScrapedKeywordResult {
@@ -37,9 +21,22 @@ export interface ScrapedKeywordResult {
   filteredNoLinkCount: number;
   filteredLowViewsCount: number;
   filteredNoUrlCount: number;
-  /** Tweets dropped by the CJK backstop when `searchLang === 'en'`. */
+  /** Search-result rows dropped for not being English (CJK-dominated text). */
   filteredNonEnglishCount: number;
   totalFound: number;
+}
+
+/**
+ * Language policy for the search-results list.
+ *
+ * X's own `lang:` operator is NOT used: it silently drops top-ranked posts
+ * (measured 2026-11-06 — the #1 result of "Agent system" disappears under
+ * `lang:en`, while it is still #1 without it). The list itself is filtered
+ * instead: a row whose preview text reads as non-English never becomes a
+ * candidate.
+ */
+export function isEnglishListText(text: string): boolean {
+  return !isCjkDominated(text);
 }
 
 /**
@@ -127,7 +124,6 @@ export async function scrapeTweetsForKeywords(
   let filteredNoUrlCount = 0;
   let filteredNonEnglishCount = 0;
   const minViews = options.minViews ?? 1000;
-  const searchLang = options.searchLang === undefined ? null : options.searchLang;
   const tweetMap = new Map<string, ExtractedTweet>();
   // Tweets rejected by the view/link filters must never be re-processed on the
   // next scroll round: without this the same low-view post is re-parsed (and
@@ -135,15 +131,7 @@ export async function scrapeTweetsForKeywords(
   const seenTweetIds = new Set<string>();
 
   console.log(
-    pc.dim(
-      `  • 搜索语言过滤: ${searchLang ? `lang:${searchLang}（同时开启 CJK 兜底）` : '关闭（X 的 lang: 过滤会漏掉 Top 首位帖子；需要时用 --search-lang en 显式开启）'}`
-    )
-  );
-
-  console.log(
-    pc.dim(
-      `  • 搜索语言过滤: ${searchLang ? `lang:${searchLang}（同时开启 CJK 兜底）` : '关闭（X 的 lang: 过滤会漏掉 Top 首位帖子；需要时用 --search-lang en 显式开启）'}`
-    )
+    pc.dim('  • 搜索语言: 不使用 X 的 lang: 操作符（它会漏掉 Top 首位帖子），改为只保留列表文本为英文的条目')
   );
 
   const buildResult = (): ScrapedKeywordResult => {
@@ -161,7 +149,7 @@ export async function scrapeTweetsForKeywords(
   };
 
   for (const rawKeyword of options.keywords) {
-    const keyword = normalizeSearchQuery(rawKeyword, { lang: searchLang });
+    const keyword = rawKeyword.trim();
     console.log(`\n🔍 Searching X for query: "${keyword}" (target: ${options.tweetsPerKeyword} valid posts with links/articles)...`);
     let collectedForThisKeyword = 0;
     const maxScrolls = Math.max(12, Math.ceil(options.tweetsPerKeyword * 0.75) + 8);
@@ -175,7 +163,7 @@ export async function scrapeTweetsForKeywords(
       if (collectedForThisKeyword >= options.tweetsPerKeyword) break;
 
       const feedLabel = rank === 'top' ? 'Top' : 'Latest';
-      const searchUrl = buildXSearchUrl(rawKeyword, rank, searchLang);
+      const searchUrl = buildXSearchUrl(rawKeyword, rank, null);
 
       if (rank === 'live') {
         console.log(
@@ -370,11 +358,11 @@ export async function scrapeTweetsForKeywords(
             continue;
           }
 
-          // 6b. Language backstop. `lang:en` is X's heuristic and still lets
-          // mixed-script posts through (the 2026-11-04 Top sweep collected
-          // Chinese tweets that then drove a Chinese core topic), so drop
-          // CJK-dominated bodies at the text level as well.
-          if (searchLang === 'en' && isCjkDominated(text)) {
+          // 6b. Language policy on the results list: X's `lang:` operator is
+          // unreliable (it hides the top-ranked post), so the English check runs
+          // here on the row's own text. Image/video-only rows have empty text
+          // and are unaffected.
+          if (!isEnglishListText(text)) {
             filteredNonEnglishCount++;
             console.log(
               pc.dim(`  ↳ Skip non-English tweet [${authorHandle || 'unknown'}]: ${text.slice(0, 40).replace(/\s+/g, ' ')}...`)

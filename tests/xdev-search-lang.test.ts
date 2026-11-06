@@ -1,7 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeSearchQuery } from '../src/pipelines/xdev/scraper.js';
-import { XDevPipelineOptionsSchema } from '../src/pipelines/xdev/contracts.js';
+import { isEnglishListText, normalizeSearchQuery } from '../src/pipelines/xdev/scraper.js';
 import {
   buildXSearchUrl,
   isCjkDominated,
@@ -34,40 +33,55 @@ describe('normalizeSearchQuery', () => {
   });
 });
 
-describe('xdev search language option', () => {
-  test('default is NO language operator (X drops top-ranked posts under lang:en)', () => {
-    // A/B measured 2026-11-06 on the live Top feed:
-    //   q=Agent system            → DeepSeekHarness/2116857257245987236 at #1
-    //   q=Agent system lang:en    → that same post is absent from the feed
-    assert.equal(XDevPipelineOptionsSchema.parse({}).searchLang, null);
-    assert.equal(XDevPipelineOptionsSchema.parse({ searchLang: 'en' }).searchLang, 'en');
-  });
-
-  test('"none" disables the operator, explicit codes pass through', () => {
-    assert.equal(parseSearchLangOption('none'), null);
-    assert.equal(parseSearchLangOption('off'), null);
-    assert.equal(parseSearchLangOption('false'), null);
-    assert.equal(parseSearchLangOption('en'), 'en');
-    assert.equal(parseSearchLangOption('zh'), 'zh');
-  });
-
-  test('buildXSearchUrl omits the operator when lang is null', () => {
+describe('xdev search: no lang: operator in the query', () => {
+  test('the scraper builds the search URL without any lang: operator', () => {
+    // X's lang filter drops top-ranked posts: `q=Agent system lang:en` hides the
+    // #1 result (DeepSeekHarness/2116857257245987236) that plain `q=Agent system`
+    // still returns at #1. So the pipeline never sends lang: to X.
     assert.equal(
       buildXSearchUrl('Agent system', 'top', null),
       'https://x.com/search?q=Agent%20system&f=top'
     );
     assert.equal(
+      buildXSearchUrl('Agent system', 'live', null),
+      'https://x.com/search?q=Agent%20system&f=live'
+    );
+  });
+
+  test('the language option survives for other pipelines (xhot)', () => {
+    assert.equal(parseSearchLangOption('en'), 'en');
+    assert.equal(parseSearchLangOption('none'), null);
+    assert.equal(
       buildXSearchUrl('Agent system', 'top', 'en'),
       'https://x.com/search?q=Agent%20system%20lang%3Aen&f=top'
-    );
-    assert.equal(
-      buildXSearchUrl('Agent system lang:zh', 'live', 'en'),
-      'https://x.com/search?q=Agent%20system%20lang%3Azh&f=live'
     );
   });
 });
 
-describe('CJK backstop (only active with --search-lang en)', () => {
+describe('xdev search: only English rows enter the candidate pool', () => {
+  test('Chinese rows are rejected on the result-list text', () => {
+    assert.equal(isEnglishListText('别学 subagent 了，现在都玩单 Agent + Main Loop 了。'), false);
+    assert.equal(isEnglishListText('为 Agent 打造一个 Skill 学习网络'), false);
+  });
+
+  test('English rows pass — including long-form posts whose article body is Chinese', () => {
+    // The DeepSeek post is an X Article: English preview text, Chinese original
+    // body. It must survive the list filter (that was the whole point).
+    assert.equal(
+      isEnglishListText('Exploring Super-agent Design: Towards a More Autonomous Agent System'),
+      true
+    );
+    assert.equal(isEnglishListText('Google just released a free 2-hour course on agent engineering'), true);
+  });
+
+  test('image/video-only rows (empty text) are never dropped', () => {
+    assert.equal(isEnglishListText(''), true);
+    assert.equal(isEnglishListText('   '), true);
+    assert.equal(isEnglishListText('🤖🚀'), true);
+  });
+});
+
+describe('CJK detection used by the list filter', () => {
   test('drops Chinese bodies', () => {
     assert.equal(isCjkDominated('别学 subagent 了，现在都玩单 Agent + Main Loop 了。'), true);
     assert.equal(isCjkDominated('为 Agent 打造一个 Skill 学习网络'), true);

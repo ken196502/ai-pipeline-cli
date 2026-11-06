@@ -2,7 +2,6 @@ import { Command } from 'commander';
 import pc from 'picocolors';
 import { executeXDevPipeline, xdevPipeline } from './execute.js';
 import { XDevPipelineOptionsSchema, resolvePublishMode, type XDevPipelineOptions } from './contracts.js';
-import { parseSearchLangOption } from '../../libs/text/index.js';
 
 export function attachXDevOptions(cmd: Command): Command {
   return cmd
@@ -23,11 +22,6 @@ export function attachXDevOptions(cmd: Command): Command {
     .option('--draft-only', 'Force DRAFT even if --publish/--publish-mode publish is given (default is already draft)', false)
     .option('--publish-mode <mode>', "'draft' (default) or 'publish'")
     .option('--min-views <number>', 'Minimum views required for candidate tweets', '1000')
-    .option(
-      '--search-lang <code>',
-      'Optional language operator for X search (e.g. en, zh). Default "none": X\'s lang filter drops top-ranked posts (measured: the #1 result of "Agent system" disappears under lang:en)',
-      'none'
-    )
     .option('--tweets-per-keyword <number>', 'Valid tweets to collect per search keyword', '10')
     .option('--keywords <words...>', 'Search keywords for tweet scraping');
 }
@@ -58,7 +52,6 @@ export async function handleXDevCommand(opts: any): Promise<void> {
     publishToX: opts.publishToX !== false,
     publishMode,
     minViews: parseInt(opts.minViews ?? '1000', 10),
-    searchLang: parseSearchLangOption(opts.searchLang),
     tweetsPerKeyword: parseInt(opts.tweetsPerKeyword ?? '10', 10),
     keywords: opts.keywords && opts.keywords.length ? opts.keywords : ['Agent system', 'Agent orchestration'],
   });

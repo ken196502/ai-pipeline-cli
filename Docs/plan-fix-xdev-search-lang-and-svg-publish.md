@@ -281,3 +281,21 @@ filtered: nonEnglish=0 noLink=2 lowViews=1 ads=1
 - 中文原文长文会被选中，正文仍由英文闸门保证输出英文，但 `coreTopic` / `executiveSummaryZh`
   这类中间产物会是中文（2026-11-05 那次就是这样）。
 - 若要「只要英文来源」，用 `--search-lang en`，代价是本次这类 Top 首位帖子会被漏掉。
+
+### 最终策略（按用户要求：去掉 lang，改为列表级英文过滤）
+
+- **彻底移除** xdev 的 `--search-lang` 选项与 `searchLang` 配置：查询 URL 永远是
+  `https://x.com/search?q=<keyword>&f=top`，不再向 X 发送任何 `lang:` 操作符
+  （`buildXSearchUrl(rawKeyword, rank, null)`）。xhot 仍保留自己的 lang 逻辑，互不影响。
+- **列表级英文过滤（无条件生效）**：`scraper.ts` 新增纯函数
+  `isEnglishListText(text) = !isCjkDominated(text)`，在「阅读量过滤之后、外链/长文判定之前」
+  逐条判断搜索结果行的预览文本；CJK 占比 ≥ 15% 即丢弃并打印
+  `↳ Skip non-English tweet [@handle]: …`，计入 `filteredNonEnglishCount`（写进 stage summary）。
+  - 纯图/纯视频行文本为空 → CJK 比例为 0 → 不会被误杀。
+  - 英文标题 + 中文正文的长文（本次的 DeepSeekHarness 帖）→ 列表文本是英文 → 保留。
+- 实测（2026-11-06）：
+  - `Agent system` → `#1 @DeepSeekHarness`（3.19M views）重新进入候选池；
+  - `智能体` → `Skip non-English tweet` 连续丢弃 `@guanmo_ai / @huxlab / @katcat_AI /
+    @jinchenma_ai / @Khazix0918` 等中文行，一条都不进候选。
+- 测试：`tests/xdev-search-lang.test.ts` 覆盖「URL 不含 lang:」「中文行被拒」「英文长文标题通过」
+  「纯图/空文本不被误杀」。

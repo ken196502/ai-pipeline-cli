@@ -98,7 +98,6 @@ export async function runXDevPipeline(options: XDevPipelineOptions): Promise<XDe
       keywords,
       tweetsPerKeyword: options.tweetsPerKeyword,
       minViews,
-      searchLang: options.searchLang,
     });
 
     const allTweets = scrapeResult.tweets;
