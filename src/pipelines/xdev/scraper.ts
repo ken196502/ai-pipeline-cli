@@ -67,6 +67,27 @@ export function parseTweetViews(text?: string | null): number {
 }
 
 /**
+ * X answers a throttled/blocked search with an empty timeline plus this
+ * banner. Treating that as "no candidates" produced a misleading
+ * "未抓取到符合条件的候选推文" after a 60s sweep of nothing.
+ */
+const SEARCH_BLOCK_BANNER = /Something went wrong\. Try reloading\.|Rate limit exceeded/i;
+
+async function detectSearchBlock(browser: Browser): Promise<string | null> {
+  try {
+    const banner = await browser.execute((pattern: string) => {
+      const text = document.body.innerText || '';
+      const re = new RegExp(pattern, 'i');
+      const match = re.exec(text);
+      return match ? match[0] : null;
+    }, SEARCH_BLOCK_BANNER.source);
+    return typeof banner === 'string' ? banner : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Waits until the feed renders at least one tweet article.
  */
 async function waitForTweets(browser: Browser, timeoutMs = 8000): Promise<boolean> {
@@ -102,6 +123,20 @@ export async function scrapeTweetsForKeywords(
   // re-logged) on every iteration, which stalls the sweep.
   const seenTweetIds = new Set<string>();
 
+  const buildResult = (): ScrapedKeywordResult => {
+    const tweetList = Array.from(tweetMap.values());
+    return {
+      tweets: tweetList,
+      filteredAdCount,
+      filteredRetweetCount,
+      filteredNoLinkCount,
+      filteredLowViewsCount,
+      filteredNoUrlCount,
+      filteredNonEnglishCount,
+      totalFound: tweetList.length,
+    };
+  };
+
   for (const rawKeyword of options.keywords) {
     const keyword = normalizeSearchQuery(rawKeyword, { lang: searchLang });
     console.log(`\n🔍 Searching X for query: "${keyword}" (target: ${options.tweetsPerKeyword} valid posts with links/articles)...`);
@@ -131,6 +166,17 @@ export async function scrapeTweetsForKeywords(
       await browser.url(searchUrl);
       const loaded = await waitForTweets(browser, 8000);
       if (!loaded) {
+        const block = await detectSearchBlock(browser);
+        if (block) {
+          const message =
+            `[x-search] X 拒绝返回搜索结果（页面提示 "${block}"）— 搜索接口被限流/风控，` +
+            `URL: ${searchUrl}。这不是关键词无结果，请稍后重试或更换出口 IP。`;
+          console.error(pc.red(`  ✖ ${message}`));
+          // Keep whatever was already collected; only abort when the sweep is empty,
+          // otherwise a late throttle would throw away valid candidates.
+          if (tweetMap.size === 0) throw new Error(message);
+          return buildResult();
+        }
         console.log(pc.yellow(`  ⚠ [${keyword}] ${feedLabel} 流未即时渲染出推文，继续进入滚动检查`));
       } else {
         // Small buffer to ensure first tweet data/aria attributes are fully hydrated
@@ -405,16 +451,5 @@ export async function scrapeTweetsForKeywords(
     }
   }
 
-  const tweetList = Array.from(tweetMap.values());
-
-  return {
-    tweets: tweetList,
-    filteredAdCount,
-    filteredRetweetCount,
-    filteredNoLinkCount,
-    filteredLowViewsCount,
-    filteredNoUrlCount,
-    filteredNonEnglishCount,
-    totalFound: tweetList.length,
-  };
+  return buildResult();
 }
