@@ -63,16 +63,96 @@ export interface TweetEvaluationResult {
 export function buildCandidateList(tweets: ExtractedTweet[]): string {
   return tweets
     .map((t, idx) => {
+      const articleBody = (t.blogs?.[0]?.content || '').trim();
+      const typeLine = t.isXArticle
+        ? `类型: X 原生长文（Article）${articleBody ? '，正文已预取' : '，正文未预取（仅标题）'}`
+        : '类型: 普通推文';
+      const linkLine = t.externalLinks.join(', ') || (t.isXArticle ? `无（原生长文: ${t.articleUrl || t.url}）` : '无');
+      const bodyBlock = articleBody
+        ? `\n长文正文（前 1500 字）:\n${articleBody.slice(0, 1500)}`
+        : '';
       return `[候选 #${idx}]
 作者: ${t.authorName} (${t.authorHandle})
 推文链接: ${t.url}
+${typeLine}
 阅读量: ${t.views != null ? t.views.toLocaleString() : '未知'}
-外链: ${t.externalLinks.join(', ') || '无'}
+外链: ${linkLine}
 推文原句:
-${t.text.replace(/\n+/g, ' ').slice(0, 2000)}
+${t.text.replace(/\n+/g, ' ').slice(0, 2000)}${bodyBlock}
 ---`;
     })
     .join('\n\n');
+}
+
+/** Minimal shape needed to pre-fetch an article body (browser driver or a test double). */
+export interface ArticleFetcher {
+  fetchArticleContent(url: string): Promise<{ title: string; content: string; excerpt: string }>;
+}
+
+/**
+ * Pre-fetches the body of native X Article candidates BEFORE the reviewer scores
+ * them.
+ *
+ * The timeline card carries only the article title, so a 3.1M-view deep dive and
+ * a one-line post looked identical to the reviewer — measured 2026-11-06, the
+ * highest-view candidate of "Agent system" lost the scoring pass for exactly
+ * that reason. Bodies are fetched newest-engagement-first and bounded, so the
+ * stage cost stays predictable.
+ */
+export async function hydrateArticleCandidates(
+  tweets: ExtractedTweet[],
+  fetcher: ArticleFetcher,
+  options: { limit?: number; minChars?: number } = {}
+): Promise<{ hydrated: number; failed: number; skipped: number }> {
+  const limit = options.limit ?? 8;
+  const minChars = options.minChars ?? 200;
+  const candidates = tweets.filter((t) => t.isXArticle && t.articleUrl);
+  const targets = candidates
+    .filter((t) => (t.blogs?.length ?? 0) === 0)
+    .sort((a, b) => (b.views ?? 0) - (a.views ?? 0))
+    .slice(0, limit);
+  const skipped = candidates.length - targets.length;
+
+  if (targets.length === 0) return { hydrated: 0, failed: 0, skipped };
+
+  console.log(
+    pc.cyan(
+      `  • 预取 ${targets.length} 条 X 原生长文正文（供审稿人评分，按阅读量取前 ${limit} 条${skipped > 0 ? `，${skipped} 条超出预算` : ''}）...`
+    )
+  );
+
+  let hydrated = 0;
+  let failed = 0;
+  for (const tweet of targets) {
+    const url = tweet.articleUrl!;
+    try {
+      console.log(pc.dim(`    🔗 ${url} (${(tweet.views ?? 0).toLocaleString()} views)`));
+      const article = await fetcher.fetchArticleContent(url);
+      const content = (article.content || '').trim();
+      if (content.length < minChars) {
+        failed += 1;
+        console.warn(pc.yellow(`      ⚠ 正文仅 ${content.length} 字符（< ${minChars}），该候选仍以标题参与评分`));
+        continue;
+      }
+      // The X article page <title> is just "X"; fall back to the post text
+      // (which is the article headline on Article cards).
+      const pageTitle = (article.title || '').trim();
+      const title = pageTitle && pageTitle.toLowerCase() !== 'x' ? pageTitle : tweet.text.replace(/^Article\s*/i, '').slice(0, 120);
+      tweet.blogs.push({
+        url,
+        title: title || undefined,
+        content: content.slice(0, 4000),
+        excerpt: article.excerpt || content.slice(0, 300),
+      });
+      hydrated += 1;
+      console.log(pc.green(`      ✔ ${content.length} 字符: "${title.slice(0, 60)}"`));
+    } catch (err) {
+      failed += 1;
+      console.warn(pc.yellow(`      ⚠ 预取失败 ${url}: ${(err as Error).message}`));
+    }
+  }
+  console.log(pc.dim(`  • 长文正文预取结果: ${hydrated} 成功 / ${failed} 失败 / ${skipped} 超预算`));
+  return { hydrated, failed, skipped };
 }
 
 /**
@@ -89,7 +169,7 @@ const HARD_DISQUALIFIER_RULES = `仅以下四类内容判为 0 分并淘汰（�
 const SCORING_RUBRIC = `评分维度（总分 100，按权重打分后排序）：
    1. 工程实质（40 分）：是否给出可复用的机制、协议、数据结构、调度/状态方案、失败模式或量化数据；只有口号与形容词的给低分。
    2. 题材相关性（30 分）：与 AI Agent 工程直接相关，包括多智能体协同与编排、工具调用、上下文与记忆管理、任务分发与调度、评测与回归、沙箱与容错、成本与延迟优化、生产落地复盘。宽口径接收，不要求必须是“硬核多智能体”。
-   3. 可验证性（20 分）：是否附带外链长文、论文、GitHub 仓库、benchmark 或可查证的一手数据。
+   3. 可验证性（20 分）：是否附带外链长文、X 原生长文正文（已预取时计入）、论文、GitHub 仓库、benchmark 或可查证的一手数据。
    4. 新颖度（10 分）：是否提供往期清单里没有出现过的具体机制、问题或数据。`;
 
 function buildScoringPrompt(candidateList: string, history: XDevHistoryEntry[]): string {

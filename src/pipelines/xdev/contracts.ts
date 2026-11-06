@@ -22,6 +22,15 @@ export interface ExtractedTweet {
   blogs: ExtractedBlog[];
   isMultiAgentRelated: boolean;
   multiAgentRationale?: string;
+  /**
+   * Native X long-form post (Article).
+   *
+   * The timeline card only shows the article TITLE, so without this flag the
+   * reviewer scores a 3.1M-view deep dive as if it were a one-line post.
+   */
+  isXArticle?: boolean;
+  /** Permalink of that native article (`https://x.com/<handle>/article/<id>`). */
+  articleUrl?: string;
 }
 
 export interface ExtractedBlog {

@@ -299,3 +299,50 @@ filtered: nonEnglish=0 noLink=2 lowViews=1 ads=1
     @jinchenma_ai / @Khazix0918` 等中文行，一条都不进候选。
 - 测试：`tests/xdev-search-lang.test.ts` 覆盖「URL 不含 lang:」「中文行被拒」「英文长文标题通过」
   「纯图/空文本不被误杀」。
+
+## 八、为什么"最高阅读量"的帖子没被引用（Stage 2 打分机制）
+
+去掉 `lang:` 后，DeepSeekHarness 那帖确实以 **#1（3,196,230 views）** 进入候选池
+（见 `artifacts/xdev/_supervisor/verify-nolang.log` 第 18 行），但 Stage 2 的审稿人把它淘汰了：
+
+```
+#5 88 分 @0xwhrrari   ← 选中
+#2 75 分 @StackDhruv
+#13 70 分 @monokern
+#4 65 分 @_avichawla
+#14 65 分 @Promixyz
+（DeepSeekHarness 不在前五）
+```
+
+根因不是"搜索/语言"，而是**打分时看不到长文正文**：
+
+1. 选题由 LLM 按 100 分制打分（工程实质 40 / 相关性 30 / 可验证性 20 / 新颖度 10），
+   **阅读量只展示、不参与计分**。
+2. X 原生长文在时间线卡片上**只露出标题**：
+   `推文原句 = "ArticleExploring Super-agent Design: Towards a More Autonomous Agent System"`，
+   而 `外链: 无` —— 于是「工程实质」和「可验证性」两项都接近 0 分。
+3. 正文（`fetchSelectedArticles`）原本在 **Stage 3** 才抓，也就是**选完之后**才抓 →
+   长文永远只能拿标题参赛，必然输给有正文的普通推文。
+
+### 修正
+
+- `contracts.ts`：`ExtractedTweet` 增加 `isXArticle` / `articleUrl`（`scraper` 落库时写入，
+  `articleUrl = x.com/<handle>/article/<statusId>`）。
+- `analyzer.ts`：
+  - `buildCandidateList()` 增加 `类型: X 原生长文（Article），正文已预取 / 未预取（仅标题）`，
+    并把预取到的正文（前 1500 字）一并给审稿人；`外链` 行注明「无（原生长文: URL）」。
+  - 新增 `hydrateArticleCandidates(tweets, fetcher, {limit=8, minChars=200})`：
+    在 Stage 2 打分**之前**，按阅读量从高到低预取最多 8 条 X 原生长文正文
+    （失败/过短/超预算都显式打日志，不静默）。
+  - 评分细则「可验证性」明确把「X 原生长文正文（已预取）」计入。
+- `execute.ts`：Stage 2 先 hydrate 再打分，stage summary 报出预取条数。
+- 实测 `fetchArticleContent('https://x.com/DeepSeekHarness/article/2116857257245987236')`
+  → 4000 字符正文（页面 `<title>` 是 "X"，故标题回退用推文标题）。
+- 测试：`tests/xdev-candidate-articles.test.ts`（5 例：类型标注、正文注入、按阅读量取前 N、
+  过短判失败、单条失败不影响整批）。
+
+### 仍未改变的部分（需产品决策）
+
+- 阅读量**依然不参与计分**。若要求"阅读量最高的必须当引用"，需要显式改规则
+  （例如给热度 5–10 分，或"阅读量 > N 且分数不低于阈值者优先"），这属于产品策略，
+  不应由实现悄悄决定。

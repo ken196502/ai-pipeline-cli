@@ -10,6 +10,7 @@ import { loadAccountPublishedHistory } from './account-history.js';
 import {
   evaluateAndSelectCoreThemes,
   fetchSelectedArticles,
+  hydrateArticleCandidates,
   generateCreativeSparkInsights,
   generateSvgArchitectureDiagram,
   generateSvgSequenceDiagram,
@@ -137,12 +138,16 @@ export async function runXDevPipeline(options: XDevPipelineOptions): Promise<XDe
     activeStage = 'llm-eval-selection';
     const stage2Start = Date.now();
 
+    // Native X Articles only expose their TITLE on the timeline card; without
+    // the body the reviewer scores a 3.1M-view deep dive like a one-liner.
+    const hydration = await hydrateArticleCandidates(freshTweets, driver);
+
     const evalResult = await evaluateAndSelectCoreThemes(freshTweets, history);
     stages.push({
       stage: 'llm-eval-selection',
       status: 'completed',
       durationMs: Date.now() - stage2Start,
-      summary: `Strictly selected ${evalResult.selectedTopics.length} core topic(s) out of ${freshTweets.length} fresh candidates (${repeated.length} skipped as already written).`,
+      summary: `Strictly selected ${evalResult.selectedTopics.length} core topic(s) out of ${freshTweets.length} fresh candidates (${repeated.length} skipped as already written; ${hydration.hydrated} X-article bodies pre-fetched for scoring).`,
     });
 
     // Stage 3: Targeted deep crawl of articles

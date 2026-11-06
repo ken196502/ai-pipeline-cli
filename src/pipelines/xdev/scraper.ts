@@ -377,6 +377,7 @@ export async function scrapeTweetsForKeywords(
           // check therefore dropped every Article post — including 1M+ view
           // ones — as "no external link".
           let hasXArticle = false;
+          let xArticleUrl: string | undefined;
           try {
             const articleCover = await article.$('[data-testid="article-cover-image"]', { strict: false });
             hasXArticle = !!(articleCover && (await articleCover.isExisting()));
@@ -392,6 +393,7 @@ export async function scrapeTweetsForKeywords(
               if (articleHref) {
                 const fullHref = articleHref.startsWith('http') ? articleHref : `https://x.com${articleHref}`;
                 if (!externalLinks.includes(fullHref)) externalLinks.push(fullHref);
+                if (!xArticleUrl) xArticleUrl = fullHref;
               }
             }
 
@@ -442,6 +444,11 @@ export async function scrapeTweetsForKeywords(
             views,
             externalLinks,
             blogs: [],
+            isXArticle: hasXArticle,
+            // Native articles share the status id: x.com/<handle>/article/<id>.
+            articleUrl: hasXArticle
+              ? xArticleUrl || `https://x.com/${authorHandle.replace(/^@/, '')}/article/${tweetId}`
+              : undefined,
             isMultiAgentRelated: true,
             multiAgentRationale: `Found via target query [${keyword}] with ${views} views and ${externalLinks.length} linked articles`,
           };
