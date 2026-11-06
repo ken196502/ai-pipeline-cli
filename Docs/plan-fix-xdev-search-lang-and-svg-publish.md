@@ -233,3 +233,51 @@ CSS 写了一半就被切断，`</style>`、整张图的 `<rect>/<text>` 全部�
 
 - 尚未真跑一次完整 xdev（浏览器 + Grok + 生图约 20 分钟）验证 `--search-lang` 与草稿发布端到端；
   建议用命名 tmux 会话跑 `--draft-only`，验收点见第四节。
+
+## 七、更正：`lang:en` 才是漏掉 Top 首位帖子的原因（A/B 实测）
+
+### 先更正一处错误推断
+
+上一版把 `The original article is in Chinese. This is a machine translation.` 当成了 X 的应用内提示。
+实际打开 `https://x.com/DeepSeekHarness/article/2116857257245987236` 可见，它是**文章正文的第一段**
+（紧跟在作者名/互动数之后，`<html lang="en">`）。由此推出「X 把它判为 zh」是**没有依据的**，撤回。
+
+### 实测（2026-11-06，同一会话，同一账号，`f=top`）
+
+| 查询 | 返回条数 | `DeepSeekHarness/2116857257245987236` |
+| --- | --- | --- |
+| `Agent system` | 6 | **#1** ✅ |
+| `Agent system lang:en` | 4 | 不存在 ❌ |
+| `Exploring Super-agent Design` | 5 | **#1** ✅ |
+| `Exploring Super-agent Design lang:en` | 6 | 不存在 ❌ |
+| `from:DeepSeekHarness` | 0（该账号只有长文帖，普通搜索不索引） | — |
+
+结论：**帖子仍在 Top 第一位**，是 `lang:en` 这个操作符把它从结果里剔掉了
+（X 对长文帖的语言判定依据文章正文，而正文是中文原文的机器翻译）。
+这是 b91feab 把 `lang:en` 设为 xdev 默认值后引入的回归。
+
+### 修正
+
+- `contracts.ts` / `cli.ts`：`searchLang` 默认改为 `null`（`--search-lang none`），
+  即**默认不向查询追加语言操作符**；`--search-lang en` 仍可显式开启（此时 CJK 兜底才生效）。
+- `scraper.ts`：未传 `searchLang` 时不再默认 `'en'`；启动时打印当前语言策略，避免再次"静默过滤"。
+- 顺带补上「无外链/长文」丢弃的日志（之前是静默 `continue`，导致"帖子为什么没进来"无法从日志回答）。
+- 语言控制回到素材/产出层：文章正文本来就有英文闸门（CJK 占比 > 5% 判不合格）。
+
+### 修复后实测（`scrapeTweetsForKeywords('Agent system', 4)`）
+
+```
+collected=4 targetPresent=true
+target at position #1: views=3191161 links=0
+order: #1 @DeepSeekHarness, #2 @AnatoliKopadze, #3 @StackDhruv, #4 @AnatoliKopadze
+filtered: nonEnglish=0 noLink=2 lowViews=1 ads=1
+```
+
+即：默认配置下 Top 首位帖子重新进入候选池。
+
+### 已知副作用（需产品决策）
+
+- 中文推文现在会进入候选（`filteredNonEnglishCount` 恒为 0，除非显式 `--search-lang en`）。
+- 中文原文长文会被选中，正文仍由英文闸门保证输出英文，但 `coreTopic` / `executiveSummaryZh`
+  这类中间产物会是中文（2026-11-05 那次就是这样）。
+- 若要「只要英文来源」，用 `--search-lang en`，代价是本次这类 Top 首位帖子会被漏掉。

@@ -16,6 +16,17 @@ export interface KeywordScraperOptions {
    * Language operator appended to every keyword (`en` by default).
    * `null` disables it — required for non-English topics.
    */
+  /**
+   * Language operator appended to every keyword. Default `null` = no operator.
+   *
+   * A/B measured on 2026-11-06 against the real Top feed:
+   *   q=Agent system                 → DeepSeekHarness/2116857257245987236 at #1
+   *   q=Agent system lang:en         → the same post is GONE from the feed
+   * X's lang filter silently removes the top-ranked post of a keyword, so the
+   * default must not apply it. Language control belongs to the material/output
+   * layer (see the article English gate), not to the search query.
+   * `--search-lang en` still opts in, and only then does the CJK backstop run.
+   */
   searchLang?: string | null;
 }
 
@@ -116,12 +127,24 @@ export async function scrapeTweetsForKeywords(
   let filteredNoUrlCount = 0;
   let filteredNonEnglishCount = 0;
   const minViews = options.minViews ?? 1000;
-  const searchLang = options.searchLang === undefined ? 'en' : options.searchLang;
+  const searchLang = options.searchLang === undefined ? null : options.searchLang;
   const tweetMap = new Map<string, ExtractedTweet>();
   // Tweets rejected by the view/link filters must never be re-processed on the
   // next scroll round: without this the same low-view post is re-parsed (and
   // re-logged) on every iteration, which stalls the sweep.
   const seenTweetIds = new Set<string>();
+
+  console.log(
+    pc.dim(
+      `  • 搜索语言过滤: ${searchLang ? `lang:${searchLang}（同时开启 CJK 兜底）` : '关闭（X 的 lang: 过滤会漏掉 Top 首位帖子；需要时用 --search-lang en 显式开启）'}`
+    )
+  );
+
+  console.log(
+    pc.dim(
+      `  • 搜索语言过滤: ${searchLang ? `lang:${searchLang}（同时开启 CJK 兜底）` : '关闭（X 的 lang: 过滤会漏掉 Top 首位帖子；需要时用 --search-lang en 显式开启）'}`
+    )
+  );
 
   const buildResult = (): ScrapedKeywordResult => {
     const tweetList = Array.from(tweetMap.values());
@@ -413,6 +436,11 @@ export async function scrapeTweetsForKeywords(
           // Filter out tweets that have NO external links and NO X article
           if (externalLinks.length === 0 && !hasXArticle) {
             filteredNoLinkCount++;
+            // Previously silent: a dropped post left no trace, so "why is post X
+            // missing?" was unanswerable from the run log.
+            console.log(
+              pc.dim(`  ↳ Skip text-only tweet without article/link: ${tweetUrl} | ${text.slice(0, 40).replace(/\s+/g, ' ')}`)
+            );
             continue;
           }
 

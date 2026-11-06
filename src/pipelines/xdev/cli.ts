@@ -25,8 +25,8 @@ export function attachXDevOptions(cmd: Command): Command {
     .option('--min-views <number>', 'Minimum views required for candidate tweets', '1000')
     .option(
       '--search-lang <code>',
-      'Language operator for X search (e.g. en, zh; "none" disables the filter)',
-      'en'
+      'Optional language operator for X search (e.g. en, zh). Default "none": X\'s lang filter drops top-ranked posts (measured: the #1 result of "Agent system" disappears under lang:en)',
+      'none'
     )
     .option('--tweets-per-keyword <number>', 'Valid tweets to collect per search keyword', '10')
     .option('--keywords <words...>', 'Search keywords for tweet scraping');
