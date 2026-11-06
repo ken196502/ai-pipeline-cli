@@ -234,9 +234,20 @@ export function parseResponsesResponse(payload: Record<string, unknown>): ChatRe
         ? (rawUsage.output_tokens_details as Record<string, unknown>).tokens as number
         : 0;
 
+  // Responses API reports `status: 'incomplete'` + `incomplete_details.reason`
+  // when the output was cut off; map it onto the chat-completions vocabulary.
+  const incomplete = payload.incomplete_details as Record<string, unknown> | undefined;
+  const finishReason =
+    payload.status === 'incomplete'
+      ? typeof incomplete?.reason === 'string'
+        ? incomplete.reason
+        : 'length'
+      : 'stop';
+
   return {
     content: text,
     model: typeof payload.model === 'string' ? payload.model : 'unknown',
+    finishReason,
     usage:
       inputTokens || outputTokens
         ? { promptTokens: inputTokens, completionTokens: outputTokens }
@@ -516,10 +527,15 @@ function parseChatResponse(payload: Record<string, unknown>): ChatResult {
   }
 
   const usage = extractUsage(payload.usage);
+  const finishReason =
+    first && typeof first === 'object' && typeof (first as Record<string, unknown>).finish_reason === 'string'
+      ? ((first as Record<string, unknown>).finish_reason as string)
+      : null;
   return {
     content,
     model: typeof payload.model === 'string' ? payload.model : 'unknown',
     usage,
+    finishReason,
   };
 }
 
@@ -598,6 +614,7 @@ async function parseSseChatResponse(
   let content = '';
   let reasoning = '';
   let usage: ChatResult['usage'] = null;
+  let finishReason: string | null = null;
   let resolvedModel = modelName;
   const reasoningPrinter = createReasoningPrinter(context);
 
@@ -625,6 +642,9 @@ async function parseSseChatResponse(
           }
           const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
           const first = choices[0] as Record<string, unknown> | undefined;
+          if (typeof first?.finish_reason === 'string') {
+            finishReason = first.finish_reason;
+          }
           const delta = first?.delta as Record<string, unknown> | undefined;
           if (delta) {
             if (typeof delta.content === 'string') {
@@ -661,6 +681,7 @@ async function parseSseChatResponse(
     content: finalContent,
     model: resolvedModel,
     usage,
+    finishReason,
   };
 }
 

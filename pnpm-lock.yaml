@@ -11,6 +11,9 @@ importers:
       '@esbuild/linux-arm64':
         specifier: ^0.28.2
         version: 0.28.2
+      '@xmldom/xmldom':
+        specifier: ^0.9.12
+        version: 0.9.12
       commander:
         specifier: ^13.1.0
         version: 13.1.0
@@ -423,6 +426,10 @@ packages:
   '@wdio/utils@10.1.0':
     resolution: {integrity: sha512-BABJY+L4JidOD2bfQe3icuRZ0jQeUimTwUEe66I4BHVGWwaa5QBeVU+JZmdNQLjMA9q+Nk385aL96Mb1/PbKYw==}
     engines: {node: '>=22.19.0'}
+
+  '@xmldom/xmldom@0.9.12':
+    resolution: {integrity: sha512-5AXjrcMClTryPe9LgZrygpB1lj7s0S9E0+W+AHaVKAVyHanafK86iPSvG5xHVSp/jC+VH1UXu0TAEmY279xH7A==}
+    engines: {node: '>=14.6'}
 
   '@zip.js/zip.js@2.24.0':
     resolution: {integrity: sha512-WlaVKzdqBK+RF3bdiXZWbdCnvGB6PdO4IHC1mn/2Yfl3bASgqUNegnU3+PNg61iecwoPfUi5BgLUPqBukXpyWw==}
@@ -1329,6 +1336,8 @@ snapshots:
       - proxy-agent
       - supports-color
       - yauzl
+
+  '@xmldom/xmldom@0.9.12': {}
 
   '@zip.js/zip.js@2.24.0': {}
 

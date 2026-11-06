@@ -49,6 +49,12 @@ export const XDevPipelineOptionsSchema = z.object({
    */
   publishMode: z.enum(['draft', 'publish']).default('draft'),
   minViews: z.number().int().nonnegative().default(1000),
+  /**
+   * Language operator appended to every search keyword (`en` by default).
+   * `null` (`--search-lang none`) disables it, which is required for
+   * non-English topics — the CJK backstop is then disabled too.
+   */
+  searchLang: z.string().nullable().default('en'),
   /** Valid (link/article-bearing) tweets to collect per keyword. */
   tweetsPerKeyword: z.number().int().positive().default(10),
   keywords: z.array(z.string()).default(['Agent system', 'Agent orchestration']),

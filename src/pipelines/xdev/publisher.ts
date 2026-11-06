@@ -123,14 +123,11 @@ export async function publishArticleToX(
     pc.dim(`  • ${doc.blocks.length} blocks: ${describeBlocks(doc.blocks).slice(0, 6).join(' | ')}${doc.blocks.length > 6 ? ' …' : ''}`)
   );
 
-  // 2. Assets (SVG -> PNG, resize)
+  // 2. Assets (SVG -> PNG, resize). Inside the try: a diagram that cannot be
+  // rasterised is a publish-stage failure and must be reported as such (with
+  // whatever assets were produced), not thrown out of the function.
   const opsRaw = splitIntoOps(doc.blocks);
-  const { ops, files } = await prepareArticleAssets(opsRaw, {
-    baseDir: options.assetBaseDir || artifactDir,
-    outDir: assetDir,
-    timestamp,
-  });
-  assetFiles.push(...files);
+  let ops: PreparedOp[] = [];
 
   const expected = {
     headings: doc.blocks.filter((b) => b.type === 'heading').length,
@@ -140,6 +137,13 @@ export async function publishArticleToX(
   };
 
   try {
+    const prepared = await prepareArticleAssets(opsRaw, {
+      baseDir: options.assetBaseDir || artifactDir,
+      outDir: assetDir,
+      timestamp,
+    });
+    ops = prepared.ops;
+    assetFiles.push(...prepared.files);
     // 3. Duplicate guard (publish mode only)
     if (mode === 'publish') {
       const dup = await findPublishedDuplicate(browser, title);

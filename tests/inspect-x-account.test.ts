@@ -31,6 +31,6 @@ test('inspect X account published articles and drafts', async () => {
     console.log('X compose/articles inspect:', JSON.stringify(info, null, 2));
     assert.ok(info.url.includes('articles'));
   } finally {
-    await driver.quit();
+    await driver.close();
   }
 });

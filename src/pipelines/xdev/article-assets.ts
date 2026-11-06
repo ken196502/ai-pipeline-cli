@@ -10,6 +10,7 @@ import path from 'node:path';
 import sharp from 'sharp';
 import pc from 'picocolors';
 
+import { assertSvgHasContent, assertWellFormedSvg, sanitizeSvg } from '../../libs/svg/index.js';
 import type { ArticleOp } from './article-document.js';
 
 export type PreparedOp =
@@ -38,13 +39,48 @@ function svgToRasterableBuffer(svg: string): { buffer: Buffer; width: number; he
   return { buffer: Buffer.from(fixed, 'utf-8'), width, height };
 }
 
-async function rasterizeSvg(svg: string, outPath: string): Promise<void> {
-  const { buffer, width } = svgToRasterableBuffer(svg);
+async function rasterizeSvg(svg: string, outPath: string, dumpDir: string): Promise<void> {
+  const { svg: sanitized, repairs } = sanitizeSvg(svg);
+  if (repairs.length > 0) {
+    console.warn(
+      pc.yellow(
+        `    ⚠ SVG 自动修复 ${repairs.length} 处 — ${repairs.map((r) => `${r.kind}(${r.detail})`).join(' | ')}`
+      )
+    );
+  }
+
+  // librsvg is the renderer, but it reports a malformed document as an opaque
+  // "corrupt header"; validating first gives a line number and a saved copy.
+  try {
+    assertWellFormedSvg(sanitized, 'article-svg');
+    assertSvgHasContent(sanitized, 'article-svg');
+  } catch (err) {
+    const saved = await dumpBrokenSvg(sanitized, dumpDir, 'SVG 校验失败');
+    throw new Error(`${(err as Error).message} — raw SVG saved to ${saved}`);
+  }
+
+  const { buffer, width } = svgToRasterableBuffer(sanitized);
   const scale = Math.min(2, MAX_WIDTH / Math.max(1, width));
-  await sharp(buffer, { density: Math.max(96, Math.round(72 * scale)) })
-    .resize({ width: Math.min(MAX_WIDTH, Math.round(width * scale)), withoutEnlargement: false })
-    .png()
-    .toFile(outPath);
+  try {
+    await sharp(buffer, { density: Math.max(96, Math.round(72 * scale)) })
+      .resize({ width: Math.min(MAX_WIDTH, Math.round(width * scale)), withoutEnlargement: false })
+      .png()
+      .toFile(outPath);
+  } catch (err) {
+    const saved = await dumpBrokenSvg(sanitized, dumpDir, `librsvg: ${(err as Error).message}`);
+    throw new Error(
+      `[article-assets] librsvg could not rasterise the diagram: ${(err as Error).message} — raw SVG saved to ${saved}`
+    );
+  }
+}
+
+/** Keeps the exact bytes that broke the renderer so the failure is reproducible. */
+async function dumpBrokenSvg(svg: string, dumpDir: string, reason: string): Promise<string> {
+  await fs.mkdir(dumpDir, { recursive: true });
+  const file = path.join(dumpDir, `broken-svg-${Date.now()}.svg`);
+  await fs.writeFile(file, svg, 'utf-8');
+  console.error(pc.red(`    ✖ 无法栅格化 SVG (${reason})，原始内容已保存: ${file}`));
+  return file;
 }
 
 async function normalizeRaster(filePath: string, outPath: string): Promise<void> {
@@ -86,7 +122,7 @@ export async function prepareArticleAssets(
     const outPath = path.join(options.outDir, `${baseName}.png`);
 
     if (block.svg) {
-      await rasterizeSvg(block.svg, outPath);
+      await rasterizeSvg(block.svg, outPath, options.outDir);
       files.push(outPath);
       prepared.push({ kind: 'image', filePath: outPath, alt: block.alt });
       console.log(pc.dim(`    • 矢量图已栅格化: ${path.basename(outPath)} (${block.alt})`));

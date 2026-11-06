@@ -2,7 +2,7 @@ import type { Browser } from 'webdriverio';
 import pc from 'picocolors';
 import type { ExtractedTweet } from './contracts.js';
 import type { FirefoxBiDiDriver } from './bidi-driver.js';
-import { normalizeSearchQuery } from '../../libs/text/index.js';
+import { buildXSearchUrl, isCjkDominated, normalizeSearchQuery } from '../../libs/text/index.js';
 
 // Re-exported for backward compatibility with existing callers/tests.
 export { normalizeSearchQuery };
@@ -12,6 +12,11 @@ export interface KeywordScraperOptions {
   tweetsPerKeyword: number;
   minViews?: number;
   listUrl?: string;
+  /**
+   * Language operator appended to every keyword (`en` by default).
+   * `null` disables it — required for non-English topics.
+   */
+  searchLang?: string | null;
 }
 
 export interface ScrapedKeywordResult {
@@ -21,6 +26,8 @@ export interface ScrapedKeywordResult {
   filteredNoLinkCount: number;
   filteredLowViewsCount: number;
   filteredNoUrlCount: number;
+  /** Tweets dropped by the CJK backstop when `searchLang === 'en'`. */
+  filteredNonEnglishCount: number;
   totalFound: number;
 }
 
@@ -86,7 +93,9 @@ export async function scrapeTweetsForKeywords(
   let filteredNoLinkCount = 0;
   let filteredLowViewsCount = 0;
   let filteredNoUrlCount = 0;
+  let filteredNonEnglishCount = 0;
   const minViews = options.minViews ?? 1000;
+  const searchLang = options.searchLang === undefined ? 'en' : options.searchLang;
   const tweetMap = new Map<string, ExtractedTweet>();
   // Tweets rejected by the view/link filters must never be re-processed on the
   // next scroll round: without this the same low-view post is re-parsed (and
@@ -94,7 +103,7 @@ export async function scrapeTweetsForKeywords(
   const seenTweetIds = new Set<string>();
 
   for (const rawKeyword of options.keywords) {
-    const keyword = normalizeSearchQuery(rawKeyword);
+    const keyword = normalizeSearchQuery(rawKeyword, { lang: searchLang });
     console.log(`\n🔍 Searching X for query: "${keyword}" (target: ${options.tweetsPerKeyword} valid posts with links/articles)...`);
     let collectedForThisKeyword = 0;
     const maxScrolls = Math.max(12, Math.ceil(options.tweetsPerKeyword * 0.75) + 8);
@@ -108,7 +117,7 @@ export async function scrapeTweetsForKeywords(
       if (collectedForThisKeyword >= options.tweetsPerKeyword) break;
 
       const feedLabel = rank === 'top' ? 'Top' : 'Latest';
-      const searchUrl = `https://x.com/search?q=${encodeURIComponent(keyword)}&f=${rank}`;
+      const searchUrl = buildXSearchUrl(rawKeyword, rank, searchLang);
 
       if (rank === 'live') {
         console.log(
@@ -292,6 +301,18 @@ export async function scrapeTweetsForKeywords(
             continue;
           }
 
+          // 6b. Language backstop. `lang:en` is X's heuristic and still lets
+          // mixed-script posts through (the 2026-11-04 Top sweep collected
+          // Chinese tweets that then drove a Chinese core topic), so drop
+          // CJK-dominated bodies at the text level as well.
+          if (searchLang === 'en' && isCjkDominated(text)) {
+            filteredNonEnglishCount++;
+            console.log(
+              pc.dim(`  ↳ Skip non-English tweet [${authorHandle || 'unknown'}]: ${text.slice(0, 40).replace(/\s+/g, ' ')}...`)
+            );
+            continue;
+          }
+
           // 7. Extract external links or card URLs
           const externalLinks: string[] = [];
           // X Article (long-form) posts expose a cover image and, on current
@@ -393,6 +414,7 @@ export async function scrapeTweetsForKeywords(
     filteredNoLinkCount,
     filteredLowViewsCount,
     filteredNoUrlCount,
+    filteredNonEnglishCount,
     totalFound: tweetList.length,
   };
 }

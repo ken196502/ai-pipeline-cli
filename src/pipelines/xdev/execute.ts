@@ -98,6 +98,7 @@ export async function runXDevPipeline(options: XDevPipelineOptions): Promise<XDe
       keywords,
       tweetsPerKeyword: options.tweetsPerKeyword,
       minViews,
+      searchLang: options.searchLang,
     });
 
     const allTweets = scrapeResult.tweets;
@@ -105,12 +106,12 @@ export async function runXDevPipeline(options: XDevPipelineOptions): Promise<XDe
       stage: 'scrape-and-filter',
       status: 'completed',
       durationMs: Date.now() - stage1Start,
-      summary: `Collected ${allTweets.length} qualified candidate tweets (Filtered: ${scrapeResult.filteredLowViewsCount} under ${minViews} views, ${scrapeResult.filteredAdCount} ads, ${scrapeResult.filteredRetweetCount} retweets, ${scrapeResult.filteredNoLinkCount} text-only posts without article/links, ${scrapeResult.filteredNoUrlCount} posts without a resolvable status URL).`,
+      summary: `Collected ${allTweets.length} qualified candidate tweets (Filtered: ${scrapeResult.filteredLowViewsCount} under ${minViews} views, ${scrapeResult.filteredNonEnglishCount} non-English, ${scrapeResult.filteredAdCount} ads, ${scrapeResult.filteredRetweetCount} retweets, ${scrapeResult.filteredNoLinkCount} text-only posts without article/links, ${scrapeResult.filteredNoUrlCount} posts without a resolvable status URL).`,
     });
 
     if (allTweets.length === 0) {
       throw new OperationalWarningError(
-        `未抓取到符合条件的候选推文（已过滤阅读量不足 ${minViews} 的推文 ${scrapeResult.filteredLowViewsCount} 条，广告 ${scrapeResult.filteredAdCount} 条，转推 ${scrapeResult.filteredRetweetCount} 条，无外链/长文 ${scrapeResult.filteredNoLinkCount} 条，无有效推文链接 ${scrapeResult.filteredNoUrlCount} 条）。至少需要 ${minViews} 阅读量才值得作为参考。`
+        `未抓取到符合条件的候选推文（已过滤阅读量不足 ${minViews} 的推文 ${scrapeResult.filteredLowViewsCount} 条，非英文 ${scrapeResult.filteredNonEnglishCount} 条，广告 ${scrapeResult.filteredAdCount} 条，转推 ${scrapeResult.filteredRetweetCount} 条，无外链/长文 ${scrapeResult.filteredNoLinkCount} 条，无有效推文链接 ${scrapeResult.filteredNoUrlCount} 条）。至少需要 ${minViews} 阅读量才值得作为参考。`
       );
     }
 

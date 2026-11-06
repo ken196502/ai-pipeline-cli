@@ -68,6 +68,14 @@ export interface ChatResult {
   content: string;
   model: string;
   usage: { promptTokens: number; completionTokens: number } | null;
+  /**
+   * Upstream `finish_reason` (`stop`, `length`, …).
+   *
+   * `length` means the answer was cut off mid-token — callers that expect a
+   * complete artefact (SVG, JSON) must treat it as a failure instead of
+   * accepting a truncated payload.
+   */
+  finishReason?: string | null;
 }
 
 export type JsonExtraction =

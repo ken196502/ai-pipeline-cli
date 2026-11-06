@@ -34,6 +34,7 @@
   },
   "dependencies": {
     "@esbuild/linux-arm64": "^0.28.2",
+    "@xmldom/xmldom": "^0.9.12",
     "commander": "^13.1.0",
     "geckodriver": "^8.0.0",
     "lucide-static": "^1.47.0",

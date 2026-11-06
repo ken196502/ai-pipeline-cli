@@ -1,5 +1,6 @@
 import pc from 'picocolors';
 import { chat } from '../../libs/llm/client.js';
+import { sanitizeSvg, assertWellFormedSvg, assertSvgHasContent, SvgXmlError } from '../../libs/svg/index.js';
 
 function escapeXml(str: string): string {
   return String(str || '')
@@ -48,29 +49,130 @@ export function buildHeaderBannerSvg(topicTitle: string): string {
 </svg>`;
 }
 
+/**
+ * Extracts the `<svg>…</svg>` payload from an LLM reply.
+ *
+ * A missing closing tag means the reply was truncated; that is an error, not
+ * something to paper over by appending `</svg>` (which is exactly how the
+ * 2026-11-05 run ended up rasterising a blank image).
+ */
 function cleanSvgCode(raw: string): string {
-  let cleaned = raw
+  const cleaned = String(raw ?? '')
     .replace(/^```(?:xml|svg)?/i, '')
     .replace(/```$/i, '')
     .trim();
   const startIdx = cleaned.indexOf('<svg');
   if (startIdx === -1) {
-    throw new Error(`[svg-builder] LLM output does not contain <svg> root element.\nRaw snippet:\n${cleaned.slice(0, 300)}`);
+    throw new Error(
+      `[svg-builder] LLM output does not contain <svg> root element.\nRaw snippet:\n${cleaned.slice(0, 300)}`
+    );
   }
-  let endIdx = cleaned.lastIndexOf('</svg>');
+  const endIdx = cleaned.lastIndexOf('</svg>');
   if (endIdx === -1) {
-    // If output ended slightly truncated, auto-close
-    cleaned = cleaned.slice(startIdx) + '\n</svg>';
-  } else {
-    cleaned = cleaned.slice(startIdx, endIdx + 6).trim();
+    throw new Error(
+      `[svg-builder] LLM output has no closing </svg> after ${cleaned.length} chars — the diagram was truncated mid-output. Refusing to auto-close a partial SVG.`
+    );
+  }
+  let svg = cleaned.slice(startIdx, endIdx + 6).trim();
+
+  // Basic styling injection if missing (inline attribute only — never a <style> block).
+  if (!svg.includes('border-radius')) {
+    svg = svg.replace(
+      '<svg',
+      '<svg style="border-radius: 16px; margin: 18px 0; border: 1px solid #E2E8F0; box-shadow: 0 10px 28px -6px rgba(15, 23, 42, 0.05);"'
+    );
+  }
+  return svg;
+}
+
+/** Visible primitives outside `<defs>` (markers/filters are not the diagram). */
+
+/**
+ * Sanitises, validates and content-checks one SVG candidate.
+ * Throws with a precise reason instead of returning something librsvg may
+ * silently render as an empty box.
+ */
+function finalizeSvg(raw: string, label: string): string {
+  const extracted = cleanSvgCode(raw);
+  const { svg, repairs } = sanitizeSvg(extracted);
+  if (repairs.length > 0) {
+    console.warn(
+      pc.yellow(
+        `  ⚠ [svg-builder] ${label}: 自动修复 ${repairs.length} 处 — ${repairs
+          .map((r) => `${r.kind}(${r.detail})`)
+          .join(' | ')}`
+      )
+    );
   }
 
-  // Basic styling injection if missing
-  if (!cleaned.includes('border-radius')) {
-    cleaned = cleaned.replace('<svg', '<svg style="border-radius: 16px; margin: 18px 0; border: 1px solid #E2E8F0; box-shadow: 0 10px 28px -6px rgba(15, 23, 42, 0.05);"');
-  }
-  return cleaned;
+  assertWellFormedSvg(svg, label);
+  assertSvgHasContent(svg, label);
+  return svg;
 }
+
+/**
+ * One generation + at most one validator-driven regeneration.
+ *
+ * The retry is not a silent fallback: the validator's exact error (and the
+ * offending lines) are fed back to the model, and if the second attempt is
+ * still invalid the stage fails loudly.
+ */
+async function generateValidSvg(args: { prompt: string; label: string; task: string }): Promise<string> {
+  const attempt = async (prompt: string, label: string): Promise<string> => {
+    const res = await chat({
+      messages: [{ role: 'user', content: prompt }],
+      context: { stage: 'xdev', task: args.task },
+      timeoutMs: 90_000,
+      thinking: false,
+    });
+    if (res.finishReason === 'length') {
+      throw new Error(
+        `[svg-builder] ${label}: LLM output hit the token limit (finish_reason=length, completionTokens=${res.usage?.completionTokens ?? 'unknown'}) — the SVG was cut off mid-output`
+      );
+    }
+    return finalizeSvg(res.content, label);
+  };
+
+  try {
+    return await attempt(args.prompt, args.label);
+  } catch (firstErr) {
+    const firstMessage = firstErr instanceof Error ? firstErr.message : String(firstErr);
+    console.warn(pc.yellow(`  ⚠ [svg-builder] ${args.label} 第 1 次生成不合格: ${firstMessage}`));
+    console.log(pc.dim('  ↳ 把校验器错误原文回灌给 LLM 重新生成（仅一次，仍失败则让该阶段失败）'));
+
+    const snippet = firstErr instanceof SvgXmlError && firstErr.snippet ? `\nOffending lines:\n${firstErr.snippet}` : '';
+    const repairPrompt = `${args.prompt}
+
+YOUR PREVIOUS ATTEMPT WAS REJECTED by a strict XML validator.
+Validator error: ${firstMessage}${snippet}
+
+Rewrite the ENTIRE diagram from scratch. Hard requirements:
+- Complete, well-formed XML: every opened element has its closing tag.
+- NO <style> blocks, NO CSS classes, NO <script>, NO <foreignObject>.
+- All styling goes in inline attributes (fill, stroke, stroke-width, font-size, font-weight, font-family, opacity).
+- Real geometry must be present: at least 12 of <rect>/<path>/<line>/<circle>/<text>, not only <defs>.
+- Do not repeat element definitions or emit unused declarations.
+- Output ONLY the raw <svg>...</svg> element. No prose, no markdown fences.`;
+
+    return attempt(repairPrompt, `${args.label} (repair)`);
+  }
+}
+
+/** Shared design brief: keeps the two diagram prompts from drifting apart. */
+const VISUAL_BRIEF = `AESTHETIC & TECHNICAL RULES:
+- ViewBox: 0 0 900 460 (width="100%" height="auto").
+- Clean Apple / Google Material 3 engineering look on an off-white canvas (#F8FAFC), crisp borders (#E2E8F0), soft shadows.
+- Rich macaron accents: Pistachio mint (#6EE7B7 / #34D399), coral peach (#FDA4AF / #FB7185), lilac (#C4B5FD / #A78BFA), sky cyan (#7DD3FC / #38BDF8), buttercup lemon (#FDE047), Apple System Blue (#0071E3).
+- Typography via inline attributes only: font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif".
+- Concrete technical annotations: real metrics, failure states, protocol labels, component badges.
+
+STRICT COMPLIANCE (a strict XML validator rejects the output otherwise):
+- Output ONLY the raw <svg>...</svg> element. No markdown fences, no prose.
+- 100% English text, ZERO Chinese characters.
+- NO <style> blocks, NO CSS classes, NO <script>, NO <foreignObject>: every visual property must be an inline attribute.
+- Every opened element must be closed; self-close empty elements (<rect .../>).
+- 12–60 visible elements total. Do NOT emit unused definitions or repeated declarations.
+- Text content must not contain raw < or & characters.`;
 
 /**
  * Generate a bespoke, highly customized architectural vector diagram (SVG)
@@ -92,16 +194,7 @@ CRITICAL VISUAL DESIGN PRINCIPLES:
    - If comparing single-agent vs multi-agent/pipeline: Use a side-by-side or funnel comparison showing metrics (e.g. 14/70 bugs vs 66/70 bugs, context overflow vs distributed verification).
    - If depicting loop folding / progressive disclosure: Show a central continuous loop absorbing modular skills on-demand with deferred tool search.
    - If depicting Git-backed deterministic state: Illustrate state transitions feeding into linear commit logs and branch protection rules.
-3. VISUAL QUALITY & TOKENS:
-   - ViewBox: 0 0 900 460 (width="100%" height="auto")
-   - Aesthetics: Clean Apple / Google Material 3 engineering aesthetic with a rich, luminous Macaron pastel palette. Off-white canvas (#F8FAFC), crisp subtle borders (#E2E8F0), soft drop-shadow filters, elegant multi-tone pastel linear gradients.
-   - Accents (Rich Macaron Palette): Pistachio mint (#6EE7B7 / #34D399), Soft coral peach (#FDA4AF / #FB7185), Lilac lavender (#C4B5FD / #A78BFA), Powder sky cyan (#7DD3FC / #38BDF8), Creamy buttercup lemon (#FDE047), and Apple System Blue (#0071E3) for primary anchors. Ensure diverse, rich multi-color coding across nodes and lanes.
-   - Clean Typography: font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif".
-   - Rich technical annotations: concrete metrics, failure states, protocol labels, component badges.
-4. STRICT COMPLIANCE:
-   - Output ONLY the raw <svg>...</svg> code.
-   - NO markdown code block wrapper (\`\`\`xml or \`\`\`svg).
-   - 100% English text, ZERO Chinese characters.
+3. ${VISUAL_BRIEF}
 
 Article Title: ${context.articleTitle}
 Core Topic: ${context.topicTitle}
@@ -110,19 +203,7 @@ Key Insights: ${context.creativeSparks ? context.creativeSparks.slice(0, 1000) :
 Article Content Excerpt:
 ${context.articleBody.slice(0, 4500)}`;
 
-  const res = await chat({
-    messages: [{ role: 'user', content: prompt }],
-    context: { stage: 'xdev', task: 'svg-architecture-bespoke' },
-    timeoutMs: 90_000,
-    thinking: false,
-  });
-
-  const svg = cleanSvgCode(res.content);
-  // Verify basic SVG sanity
-  if (!svg.includes('viewBox') || !svg.includes('</svg>')) {
-    throw new Error(`[svg-builder] Generated architecture SVG failed sanity check (missing viewBox or closing tag).`);
-  }
-  return svg;
+  return generateValidSvg({ prompt, label: 'architecture-svg', task: 'svg-architecture-bespoke' });
 }
 
 /**
@@ -145,16 +226,7 @@ CRITICAL VISUAL DESIGN PRINCIPLES:
    - Illustrate the exact actors, protocols, validation loops, and handshakes discussed in the article text.
    - Clearly delineate where execution succeeds vs where stochastic failure / context loss occurs.
    - Highlight state persistence (e.g. Git commits, verification gates, consensus voting).
-3. VISUAL QUALITY & TOKENS:
-   - ViewBox: 0 0 900 460 (width="100%" height="auto")
-   - Aesthetics: Clean Apple / Google Material 3 engineering aesthetic with a rich, luminous Macaron pastel palette. Off-white canvas (#F8FAFC), crisp subtle borders (#E2E8F0), soft drop-shadow filters, elegant multi-tone pastel linear gradients.
-   - Accents (Rich Macaron Palette): Pistachio mint (#6EE7B7 / #34D399), Soft coral peach (#FDA4AF / #FB7185), Lilac lavender (#C4B5FD / #A78BFA), Powder sky cyan (#7DD3FC / #38BDF8), Creamy buttercup lemon (#FDE047), and Apple System Blue (#0071E3) for primary anchors. Ensure diverse, rich multi-color coding across lifelines, validation gates, and message tokens.
-   - Clean Typography: font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif".
-   - Clear sequence markers, badges, and step callouts.
-4. STRICT COMPLIANCE:
-   - Output ONLY the raw <svg>...</svg> code.
-   - NO markdown code block wrapper (\`\`\`xml or \`\`\`svg).
-   - 100% English text, ZERO Chinese characters.
+3. ${VISUAL_BRIEF}
 
 Article Title: ${context.articleTitle}
 Core Topic: ${context.topicTitle}
@@ -163,19 +235,7 @@ Key Insights: ${context.creativeSparks ? context.creativeSparks.slice(0, 1000) :
 Article Content Excerpt:
 ${context.articleBody.slice(0, 4500)}`;
 
-  const res = await chat({
-    messages: [{ role: 'user', content: prompt }],
-    context: { stage: 'xdev', task: 'svg-sequence-bespoke' },
-    timeoutMs: 90_000,
-    thinking: false,
-  });
-
-  const svg = cleanSvgCode(res.content);
-  // Verify basic SVG sanity
-  if (!svg.includes('viewBox') || !svg.includes('</svg>')) {
-    throw new Error(`[svg-builder] Generated sequence SVG failed sanity check (missing viewBox or closing tag).`);
-  }
-  return svg;
+  return generateValidSvg({ prompt, label: 'sequence-svg', task: 'svg-sequence-bespoke' });
 }
 
 // Backward-compatible exports for unit tests
