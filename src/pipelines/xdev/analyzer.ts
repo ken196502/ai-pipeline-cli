@@ -42,6 +42,72 @@ export interface CandidateScore {
   verdictZh: string;
 }
 
+/**
+ * Weights of the final selection score.
+ *
+ * Views are the audience's verdict, so they carry the same weight as content:
+ * `final = 0.5 × content(0-100) + 0.5 × views(0-100, log-scaled)`.
+ * Change these two constants to re-balance the policy — nothing else encodes it.
+ */
+export const CONTENT_WEIGHT = 0.5;
+export const VIEW_WEIGHT = 0.5;
+
+export interface RankedCandidate {
+  index: number;
+  /** Reviewer's content score (0-100). */
+  contentScore: number;
+  /** Log-scaled views, 0-100 relative to the batch maximum. */
+  viewScore: number;
+  finalScore: number;
+}
+
+/**
+ * Log-scaled 0-100 view score relative to the batch maximum.
+ *
+ * Linear scaling would let a single outlier flatten everyone else to ~0;
+ * log10 keeps 25k vs 3.1M meaningful (~68 vs 100) while still rewarding
+ * order-of-magnitude gaps.
+ */
+export function viewScoreOf(views: number, maxViews: number): number {
+  if (!(views > 0) || !(maxViews > 0)) return 0;
+  const denom = Math.log10(1 + maxViews);
+  if (denom <= 0) return 0;
+  return Math.max(0, Math.min(100, (100 * Math.log10(1 + views)) / denom));
+}
+
+/**
+ * Combines the reviewer's content scores with audience reach and ranks the pool.
+ *
+ * Candidates the reviewer scored 0 (hard disqualifiers: shilling, pure ads,
+ * unrelated) are excluded; candidates the reviewer did not score are left out
+ * rather than being treated as zero.
+ */
+export function rankCandidates(
+  tweets: ExtractedTweet[],
+  candidateScores: CandidateScore[],
+  weights: { content?: number; views?: number } = {}
+): RankedCandidate[] {
+  const contentWeight = weights.content ?? CONTENT_WEIGHT;
+  const viewWeight = weights.views ?? VIEW_WEIGHT;
+  const maxViews = tweets.reduce((max, t) => Math.max(max, t.views ?? 0), 0);
+  const scored = new Map(candidateScores.map((s) => [s.index, s.score]));
+
+  return tweets
+    .map((tweet, index) => {
+      const contentScore = scored.get(index);
+      if (contentScore === undefined || contentScore <= 0) return null;
+      const viewScore = viewScoreOf(tweet.views ?? 0, maxViews);
+      return {
+        index,
+        contentScore,
+        viewScore,
+        finalScore: contentWeight * contentScore + viewWeight * viewScore,
+      };
+    })
+    .filter((row): row is RankedCandidate => row !== null)
+    .sort((a, b) => b.finalScore - a.finalScore);
+}
+
 export interface TweetEvaluationResult {
   selectedTopics: SelectedTopicAnalysis[];
   executiveSummaryZh: string;
@@ -55,7 +121,7 @@ export interface TweetEvaluationResult {
    * `forced-best-available`: the first pass returned no selection, so a second
    * pass was required to rank the batch and take the most informative tweet.
    */
-  selectionMode: 'scored' | 'forced-best-available';
+  selectionMode: 'scored' | 'forced-best-available' | 'view-weighted';
   selectionNoteZh?: string;
 }
 
@@ -179,6 +245,12 @@ function buildScoringPrompt(candidateList: string, history: XDevHistoryEntry[]):
 
 ${SCORING_RUBRIC}
 
+【计分口径】你只负责内容分（0–100）。最终选题由系统按「内容 ${Math.round(
+    CONTENT_WEIGHT * 100
+  )}% + 阅读量热度 ${Math.round(VIEW_WEIGHT * 100)}%」加权决定：阅读量已在候选列表中给出，你无需自行换算，
+selectedIndices 仅作参考（系统会取加权后综合分最高者）。所以请把内容分打准——尤其不要把
+「只有标题的 X 原生长文」当成无内容（长文正文已随候选附上）。
+
 ${HARD_DISQUALIFIER_RULES}
 
 【强制：必须择优】
@@ -280,6 +352,89 @@ interface SelectionAttempt {
   raw: string;
 }
 
+/**
+ * Prints the content/view/final breakdown so the choice is auditable from the
+ * run log ("why was this tweet the source?").
+ */
+function logRanking(tweets: ExtractedTweet[], ranking: RankedCandidate[]): void {
+  console.log(
+    pc.cyan(
+      `  • 综合得分（内容 ${Math.round(CONTENT_WEIGHT * 100)}% + 阅读量热度 ${Math.round(VIEW_WEIGHT * 100)}%）前五名：`
+    )
+  );
+  for (const row of ranking.slice(0, 5)) {
+    const tweet = tweets[row.index];
+    console.log(
+      pc.dim(
+        `    - #${row.index} 综合 ${row.finalScore.toFixed(1)}（内容 ${row.contentScore.toFixed(0)} / 热度 ${row.viewScore.toFixed(0)} / ${(tweet?.views ?? 0).toLocaleString()} views）@${tweet?.authorHandle ?? '?'}`
+      )
+    );
+  }
+}
+
+/**
+ * Second pass used when the view-weighted ranking disagrees with the reviewer's
+ * own pick: the winner is already decided by the stated formula, so the model
+ * only writes the topic fields for that candidate. It must not re-select.
+ */
+function buildLockedSelectionPrompt(
+  candidateList: string,
+  history: XDevHistoryEntry[],
+  winner: RankedCandidate,
+  ranking: RankedCandidate[],
+  tweets: ExtractedTweet[]
+): string {
+  const tweet = tweets[winner.index];
+  const table = ranking
+    .slice(0, 8)
+    .map(
+      (row) =>
+        `#${row.index} @${tweets[row.index]?.authorHandle ?? '?'} 内容 ${row.contentScore.toFixed(0)} / 热度 ${row.viewScore.toFixed(0)} / 综合 ${row.finalScore.toFixed(1)}`
+    )
+    .join('\n');
+
+  return `你是一名资深 AI Agent 系统架构师与技术审稿人。本期主选题已由系统按「内容 ${Math.round(
+    CONTENT_WEIGHT * 100
+  )}% + 阅读量热度 ${Math.round(VIEW_WEIGHT * 100)}%」加权锁定，禁止改选。
+
+【已锁定主选题】候选 #${winner.index} —— ${tweet?.authorName ?? ''} (${tweet?.authorHandle ?? ''})，${(
+    tweet?.views ?? 0
+  ).toLocaleString()} views
+
+【综合得分表】
+${table}
+
+你的任务：只为候选 #${winner.index} 产出 articleTitle / executiveSummaryZh / topics。
+   - selectedIndices 必须是 [${winner.index}]，topics[0].index 必须是 ${winner.index}。
+   - candidateScores 可省略；若给出，索引与分数必须与上表一致。
+   - 标题必须概括该候选（含已附长文正文）真正涉及的机制与结论；推文与正文里没有的大厂、论文、数字一律不得出现。
+   - 小标题直接说机制与动作，禁止“它不是……而是……”这类辩白句式。
+   - 全文解析必须使用纯地道专业中文。
+   - 「已写过清单」里的推文禁止选择，标题句式与结论禁止复用。
+
+已写过清单（最近 8 期，禁止重复）：
+${formatHistoryForPrompt(history)}
+
+候选列表：
+${candidateList}
+
+输出格式必须为合法 JSON（不要包含 markdown 代码块包裹）：
+{
+  "selectedIndices": [${winner.index}],
+  "articleTitle": "概括核心机制与解法的主标题",
+  "executiveSummaryZh": "精炼的中文核心观点提要",
+  "topics": [
+    {
+      "index": ${winner.index},
+      "topicTitle": "该议题的核心技术论断（中文）",
+      "topicTitleEn": "Concise engineering topic phrase in English (for diagrams and visual asset generation)",
+      "sourceIdentityZh": "客观中立的信源身份定位",
+      "corePerspectiveZh": "核心工程主张与拆解（中文，直接说事实、机制与数据）"
+    }
+  ]
+}`;
+}
+
 /** One reviewer round-trip. Malformed JSON is a hard error (not a policy rejection). */
 async function requestSelection(prompt: string, task: string): Promise<SelectionAttempt> {
   const res = await chat({
@@ -367,8 +522,50 @@ export async function evaluateAndSelectCoreThemes(
       }
     }
 
-    const validIndices: number[] = Array.isArray(parsed.selectedIndices) ? parsed.selectedIndices.slice(0, 2) : [];
-    const candidateScores = parseCandidateScores(parsed);
+    let validIndices: number[] = Array.isArray(parsed.selectedIndices) ? parsed.selectedIndices.slice(0, 2) : [];
+    let candidateScores = parseCandidateScores(parsed);
+
+    // Views are the audience's verdict: the final pick is the content score
+    // combined with reach, not the reviewer's raw favourite. When the reviewer
+    // disagrees with that formula, the winner is locked and the reviewer only
+    // writes the topic fields for it (no silent downgrade to a cold post).
+    if (candidateScores) {
+      const ranking = rankCandidates(tweets, candidateScores);
+      if (ranking.length > 0) {
+        logRanking(tweets, ranking);
+        const winner = ranking[0];
+        const llmPick = validIndices[0];
+        if (winner.index !== llmPick) {
+          console.log(
+            pc.yellow(
+              `  • 阅读量加权改判：LLM 初选 #${llmPick} → 综合最高 #${winner.index}` +
+                `（内容 ${winner.contentScore.toFixed(0)} / 热度 ${winner.viewScore.toFixed(0)} / 综合 ${winner.finalScore.toFixed(1)}）`
+            )
+          );
+          const locked = await requestSelection(
+            buildLockedSelectionPrompt(candidateList, history, winner, ranking, tweets),
+            'tweet-eval-selection-view-weighted'
+          );
+          const lockedIndex = Array.isArray(locked.parsed?.selectedIndices)
+            ? Number(locked.parsed.selectedIndices[0])
+            : NaN;
+          if (locked.rejected || lockedIndex !== winner.index) {
+            throw new Error(
+              `阅读量加权锁定候选 #${winner.index}（综合 ${winner.finalScore.toFixed(1)}）后，` +
+                `LLM 未按锁定索引产出选题（返回 selectedIndices=${JSON.stringify(locked.parsed?.selectedIndices ?? null)}）；` +
+                '拒绝静默回退到低热度候选'
+            );
+          }
+          parsed = locked.parsed;
+          validIndices = [winner.index];
+          selectionMode = 'view-weighted';
+          selectionNoteZh =
+            `阅读量加权改判：候选 #${winner.index}（内容 ${winner.contentScore.toFixed(0)} + 热度 ${winner.viewScore.toFixed(0)} = ${winner.finalScore.toFixed(1)}）` +
+            ` 取代 LLM 初选 #${llmPick}`;
+        }
+      }
+    }
+
     const selectedTopics: SelectedTopicAnalysis[] = [];
     if (!parsed.articleTitle || !String(parsed.articleTitle).trim()) {
       throw new Error('LLM 选题结果缺少 articleTitle');
