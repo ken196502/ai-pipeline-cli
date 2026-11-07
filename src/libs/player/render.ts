@@ -34,6 +34,12 @@ import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { chromium, firefox, type Browser, type BrowserContext, type Page } from 'playwright-core';
 import { resolveChromiumPath } from '../browser/installer.js';
+import {
+  probeRenderService,
+  renderViaService,
+  resolveRenderServiceGpuMode,
+  type RenderServiceGpuMode,
+} from './render-service-client.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -161,6 +167,41 @@ export const serveTutorialDir = serveExplainerDir;
 /** Default x264 preset for every chunk encode (shared by produce + host script). */
 export const DEFAULT_ENCODE_PRESET = 'medium';
 
+/**
+ * Chromium GL backend used for frame rendering.
+ *
+ * `default` leaves the choice to Chromium (SwiftShader on GPU-less hosts).
+ * `gpu` / `vulkan` force ANGLE onto the real driver and are asserted after boot:
+ * if the browser comes up on SwiftShader anyway the render fails loudly instead
+ * of silently rendering at CPU speed. Measured on this host (2026-11-05,
+ * virtio-gpu without 3D accel): default 773 ms/frame, `gpu` 797 ms/frame — both
+ * software rasterizers, so `gpu` is a deliberate opt-in, not the default.
+ */
+export type ChromiumGlMode = 'default' | 'gpu' | 'vulkan' | 'swiftshader';
+
+export function resolveChromiumGlMode(raw?: string | null): ChromiumGlMode {
+  const value = (raw ?? '').trim().toLowerCase();
+  if (!value || value === 'default' || value === 'auto') return 'default';
+  if (value === 'gpu' || value === 'gl' || value === 'angle-gl') return 'gpu';
+  if (value === 'vulkan' || value === 'angle-vulkan') return 'vulkan';
+  if (value === 'swiftshader' || value === 'cpu') return 'swiftshader';
+  throw new Error(`unknown EXPLAINER_CHROMIUM_GL "${raw}" — use default | gpu | vulkan | swiftshader`);
+}
+
+/** Extra Chromium flags for a GL mode (empty for `default`). */
+export function chromiumGlArgs(mode: ChromiumGlMode): string[] {
+  switch (mode) {
+    case 'gpu':
+      return ['--use-gl=angle', '--use-angle=gl', '--enable-gpu', '--enable-gpu-compositing'];
+    case 'vulkan':
+      return ['--use-gl=angle', '--use-angle=vulkan', '--enable-gpu', '--enable-gpu-compositing'];
+    case 'swiftshader':
+      return ['--use-gl=angle', '--use-angle=swiftshader'];
+    case 'default':
+      return [];
+  }
+}
+
 export interface LaunchRenderBrowserParams {
   engine?: ExplainerRenderEngine;
   browserPath?: string;
@@ -240,6 +281,7 @@ export async function launchRenderBrowser(
   }
 
   const executablePath = await resolveChromiumPath(params.browserPath);
+  const glMode = resolveChromiumGlMode(process.env.EXPLAINER_CHROMIUM_GL);
   const browser = await chromium.launch({
     executablePath,
     headless: true,
@@ -258,11 +300,26 @@ export async function launchRenderBrowser(
       // WebGL: hardware accelerated by default; the player probes the context
       // and falls back to Canvas2D when it cannot be created.
       '--enable-unsafe-webgpu',
+      ...chromiumGlArgs(glMode),
     ],
   });
+  if (glMode !== 'default') {
+    console.log(`[render] chromium GL mode: ${glMode} (${chromiumGlArgs(glMode).join(' ')})`);
+  }
   const page = await browser.newPage({ viewport: { width, height } });
   await page.setViewportSize({ width, height });
   return { browser, page, engine, executablePath };
+}
+
+export interface RenderServiceRouteConfig {
+  /** Base URL of the host render service, e.g. http://192.168.64.1:8790. */
+  url: string;
+  /** Bearer token; falls back to EXPLAINER_RENDER_SERVICE_TOKEN. */
+  token?: string;
+  /** GPU mode passed to the host service (falls back to EXPLAINER_RENDER_GPU / EXPLAINER_CHROMIUM_GL). */
+  gpu?: RenderServiceGpuMode;
+  probeTimeoutMs?: number;
+  pollIntervalMs?: number;
 }
 
 export interface RenderExplainerVideoParams {
@@ -298,6 +355,14 @@ export interface RenderExplainerVideoParams {
   frameExport?: 'png' | 'raw';
   logFilePath?: string;
   onProgress?: (renderedFrames: number, totalFrames: number) => void;
+  /**
+   * Host render service routing (also enabled by EXPLAINER_RENDER_SERVICE).
+   * When configured, the service is probed first; an unhealthy service fails the
+   * render — it never silently falls back to the slow local renderer.
+   */
+  renderService?: RenderServiceRouteConfig;
+  /** Explicitly bypass the render service and render on this machine. */
+  forceLocalRender?: boolean;
 }
 export type RenderTutorialVideoParams = RenderExplainerVideoParams;
 
@@ -339,6 +404,73 @@ export function resolveRenderConcurrency(cpuCount: number, override?: number): n
  */
 export function resolveFrameTimeoutMs(override?: number): number {
   return override !== undefined && Number.isFinite(override) && override > 0 ? Math.floor(override) : 60_000;
+}
+
+/** Host state that decides whether a render tab can keep up. */
+export interface SystemPressure {
+  cpuCount: number;
+  load1: number;
+  load5: number;
+  load15: number;
+  freeMb: number;
+  swapUsedMb: number;
+  swapTotalMb: number;
+}
+
+export function readSystemPressure(): SystemPressure {
+  const cpuCount = os.cpus()?.length || 1;
+  const [load1 = 0, load5 = 0, load15 = 0] = os.loadavg();
+  let freeMb = Math.floor(os.freemem() / (1024 * 1024));
+  let swapTotalMb = 0;
+  let swapUsedMb = 0;
+  try {
+    const meminfo = fs.readFileSync('/proc/meminfo', 'utf8');
+    const read = (key: string) => {
+      const match = meminfo.match(new RegExp(`^${key}:\\s+(\\d+) kB$`, 'm'));
+      return match ? Math.floor(Number(match[1]) / 1024) : 0;
+    };
+    const availableMb = read('MemAvailable');
+    if (availableMb > 0) freeMb = availableMb;
+    swapTotalMb = read('SwapTotal');
+    swapUsedMb = Math.max(0, swapTotalMb - read('SwapFree'));
+  } catch {
+    // /proc/meminfo is Linux-only; os.freemem() above is the portable part.
+  }
+  return { cpuCount, load1, load5, load15, freeMb, swapUsedMb, swapTotalMb };
+}
+
+export function describeSystemPressure(pressure: SystemPressure): string {
+  const swap =
+    pressure.swapTotalMb > 0
+      ? `${pressure.swapUsedMb}/${pressure.swapTotalMb} MB swap used`
+      : 'no swap';
+  return `load ${pressure.load1.toFixed(1)} on ${pressure.cpuCount} CPUs, ${pressure.freeMb} MB free, ${swap}`;
+}
+
+/**
+ * True when the host is starved badly enough that a 1080p render tab will start
+ * missing frames (measured on 2 cores / 4 GB with a full swap file).
+ */
+export function isSystemUnderPressure(pressure: SystemPressure): boolean {
+  const swapRatio = pressure.swapTotalMb > 0 ? pressure.swapUsedMb / pressure.swapTotalMb : 0;
+  return swapRatio >= 0.8 || pressure.load1 >= pressure.cpuCount * 2;
+}
+
+/**
+ * Per-frame ceiling, widened while frames are legitimately slow.
+ *
+ * The base value is a runaway guard, not the expected cost. On a loaded host the
+ * same frame legitimately takes 10-20x longer (measured 2026-11-05: 0.6s → 15s
+ * when a second browser job hammered a 2-core/4 GB box), and a fixed 60s ceiling
+ * aborted a 66-minute render at 64%. Scaling off the recent p90 keeps the guard
+ * meaningful: an idle box still aborts after `base`, a loaded box gets up to
+ * `5x base` instead of dying on a slow-but-alive tab.
+ */
+export function adaptiveFrameTimeoutMs(baseMs: number, recentFrameMs: number[]): number {
+  if (recentFrameMs.length < 10) return baseMs;
+  const sorted = [...recentFrameMs].sort((a, b) => a - b);
+  const p90 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.9))];
+  return Math.min(baseMs * 5, Math.max(baseMs, Math.ceil(p90 * 10)));
 }
 
 /**
@@ -412,6 +544,66 @@ export async function renderExplainerVideo(
     throw new Error('renderExplainerVideo requires explainerDir (or the legacy tutorialDir alias)');
   }
   const { timeline, narrationWavPath, outVideoPath } = params;
+
+  // ---------------------------------------------------------------------------
+  // Host render service routing (Docs/plan-explainer-host-render-service.md §5).
+  //
+  // A configured service is authoritative: if it is unhealthy the render FAILS.
+  // Silently falling back to the slow VM renderer would hide a broken host and
+  // burn an hour of CPU, so there is no fallback — only an explicit
+  // `forceLocalRender` / `--local-render` opt-out.
+  // ---------------------------------------------------------------------------
+  const serviceUrl = (params.renderService?.url || process.env.EXPLAINER_RENDER_SERVICE || '').trim();
+  if (params.forceLocalRender) {
+    if (serviceUrl) {
+      console.log('[render] --local-render set — bypassing render service');
+    }
+  } else if (serviceUrl) {
+    const gpu = resolveRenderServiceGpuMode(
+      params.renderService?.gpu ?? process.env.EXPLAINER_RENDER_GPU ?? process.env.EXPLAINER_CHROMIUM_GL
+    );
+    const token = params.renderService?.token ?? process.env.EXPLAINER_RENDER_SERVICE_TOKEN;
+    if (!token) {
+      throw new Error(
+        `[render] render service ${serviceUrl} is CONFIGURED but no token is set. ` +
+          'Set EXPLAINER_RENDER_SERVICE_TOKEN (or pass --render-service-token / params.renderService.token). ' +
+          'Refusing to render without authentication.'
+      );
+    }
+
+    console.log(`[render] render service configured: ${serviceUrl} (gpu=${gpu}) — probing /healthz ...`);
+    const healthy = await probeRenderService({
+      baseUrl: serviceUrl,
+      token,
+      probeTimeoutMs: params.renderService?.probeTimeoutMs,
+    });
+    if (!healthy) {
+      throw new Error(
+        `[render] render service ${serviceUrl} is CONFIGURED but UNHEALTHY (probe failed). ` +
+          'Refusing to silently fall back to the slow VM renderer. ' +
+          'Fix the host service, or unset EXPLAINER_RENDER_SERVICE / pass --local-render to render locally.'
+      );
+    }
+
+    console.log(`[render] ROUTING TO HOST RENDER SERVICE ${serviceUrl} (gpu=${gpu})`);
+    return await renderViaService({
+      baseUrl: serviceUrl,
+      token,
+      gpu,
+      probeTimeoutMs: params.renderService?.probeTimeoutMs,
+      pollIntervalMs: params.renderService?.pollIntervalMs,
+      explainerDir,
+      timeline,
+      outVideoPath,
+      crf: params.crf,
+      preset: params.preset,
+      fps: timeline.fps,
+      onProgress: params.onProgress,
+    });
+  } else {
+    console.log('[render] no render service configured — rendering locally on this machine');
+  }
+
   const { width, height } = timeline.resolution;
   const fps = timeline.fps;
   const totalFrames = Math.max(1, Math.round(timeline.totalDurationSec * fps));
@@ -459,6 +651,13 @@ export async function renderExplainerVideo(
     );
     const frameTimeoutEnv = process.env.EXPLAINER_FRAME_TIMEOUT_MS || process.env.TUTORIAL_FRAME_TIMEOUT_MS;
     const FRAME_TIMEOUT_MS = resolveFrameTimeoutMs(Number(frameTimeoutEnv));
+    const pressureAtStart = readSystemPressure();
+    if (isSystemUnderPressure(pressureAtStart)) {
+      console.warn(
+        `[render] WARN host under pressure before rendering: ${describeSystemPressure(pressureAtStart)} — ` +
+          'frames will be slow; stop other browser/CPU-heavy jobs to avoid a stalled tab'
+      );
+    }
     let taskIndex = 0;
 
     // Detect player HTML filename in bundle
@@ -522,6 +721,29 @@ export async function renderExplainerVideo(
             for (const warning of diag.warnings) console.warn(`[render] player warning: ${warning}`);
           }
 
+          // A requested GL backend that silently lands elsewhere would look
+          // identical in the logs. Assert the backend actually came up, and shout
+          // when it is only a software rasterizer (this host: Mesa llvmpipe behind
+          // virtio-gpu, i.e. no hardware acceleration at all).
+          const requestedGlMode = resolveChromiumGlMode(process.env.EXPLAINER_CHROMIUM_GL);
+          if (requestedGlMode === 'gpu' || requestedGlMode === 'vulkan') {
+            const rendererInfo = diag.rendererInfo || diag.renderer || '';
+            const backendOk =
+              requestedGlMode === 'gpu' ? /opengl|mesa|llvmpipe/i.test(rendererInfo) : /vulkan/i.test(rendererInfo);
+            if (!backendOk) {
+              throw new Error(
+                `chromium GL mode "${requestedGlMode}" was not honoured — the player came up on "${rendererInfo}". ` +
+                  'Refusing to render on an unexpected backend; fix the driver or use EXPLAINER_CHROMIUM_GL=default.'
+              );
+            }
+            if (/swiftshader|llvmpipe|softpipe|software/i.test(rendererInfo)) {
+              console.warn(
+                `[render] WARN GL mode "${requestedGlMode}" is up, but the driver is a SOFTWARE rasterizer (${rendererInfo}) — ` +
+                  'there is no hardware GPU acceleration on this host, so this is not faster than the default backend'
+              );
+            }
+          }
+
           // Frame transfer mode: `raw` reads RGBA straight out of the canvas
           // (bottom-up for WebGL, flipped in ffmpeg) and skips PNG entirely.
           // Measured ~30% faster per frame than PNG screenshots on real GPUs
@@ -546,12 +768,55 @@ export async function renderExplainerVideo(
           // WebGL readPixels is bottom-up; Canvas2D getImageData is top-down.
           const needsFlip = playerRenderer !== 'canvas2d';
 
-          await workerPage!.evaluate(() => {
-            document.documentElement.classList.add('render-mode');
-            document.body.classList.add('render-mode');
-            document.getElementById('hud')?.remove();
-            document.getElementById('controls')?.remove();
-          });
+          const prepareRenderPage = async () => {
+            await workerPage!.evaluate(() => {
+              document.documentElement.classList.add('render-mode');
+              document.body.classList.add('render-mode');
+              document.getElementById('hud')?.remove();
+              document.getElementById('controls')?.remove();
+            });
+          };
+
+          /**
+           * Fresh render state: reload the tab, or recreate it when the renderer
+           * process is gone (`Target crashed`). Used after a stalled frame and at
+           * every chunk boundary, so a page-side leak can never accumulate across
+           * a full 5000-frame render (2026-11-05: the tab died at frame ~3270 with
+           * the host at 27 MB free).
+           */
+          const restartRenderPage = async (reason: string) => {
+            console.log(`[render] restarting render tab (${reason})`);
+            try {
+              await workerPage!.reload({ waitUntil: 'load', timeout: 60_000 });
+            } catch (reloadErr: any) {
+              console.warn(`[render] WARN reload failed (${reloadErr?.message || reloadErr}) — recreating the tab`);
+              if (workerPage !== initialPage) await workerPage!.close().catch(() => undefined);
+              workerPage = await (sharedBrowser as any).newPage({ viewport: { width, height } });
+              await workerPage!.goto(`${server.origin}/${playerHtmlFilename}?render=1`, {
+                waitUntil: 'load',
+                timeout: 60_000,
+              });
+            }
+            await workerPage!.waitForFunction(
+              'window.__explainerReady === true || window.__tutorialReady === true || window.__explainerError || window.__tutorialError',
+              undefined,
+              { timeout: 60_000 }
+            );
+            const restartErr = await workerPage!.evaluate(
+              'window.__explainerError || window.__tutorialError || null'
+            );
+            if (restartErr) throw new Error(`explainer player failed to restart after a stalled frame: ${restartErr}`);
+            await prepareRenderPage();
+            framesOnPage = 0;
+            recentFrameMs.length = 0;
+          };
+
+          await prepareRenderPage();
+
+          // Recent per-frame wall times drive the adaptive frame ceiling below.
+          const recentFrameMs: number[] = [];
+          // Frames rendered on the current page instance (bounds memory growth).
+          let framesOnPage = 0;
 
           while (taskIndex < chunkTasks.length) {
             const currentTask = chunkTasks[taskIndex++];
@@ -573,6 +838,12 @@ export async function renderExplainerVideo(
               }
             } catch {}
             await fsp.rm(partFilePath, { force: true }).catch(() => undefined);
+
+            // Bound page-side memory growth: every chunk starts on a fresh tab, so a
+            // slow leak cannot accumulate across a 5000-frame render.
+            if (framesOnPage >= CHUNK_SIZE) {
+              await restartRenderPage(`${framesOnPage} frames rendered on one tab`);
+            }
 
             let chunkFfmpeg: ReturnType<typeof spawn> | null = null;
             let chunkCommitted = false;
@@ -610,56 +881,110 @@ export async function renderExplainerVideo(
               });
               stdin.on('error', () => undefined);
 
-              for (let frame = startFrame; frame < endFrame; frame++) {
+              const captureFrame = async (frame: number, timeoutMs: number): Promise<Buffer> => {
                 const t = frame / fps;
-
-                const frameDone = await Promise.race([
-                  (async () => {
-                    await workerPage!.evaluate((time: number) => {
-                      const api = window.__explainer || window.__tutorial;
-                      return api!.seek(time);
-                    }, t);
-                    if (frameMode === 'raw') {
-                      const b64 = await workerPage!.evaluate(async () => {
-                        const canvas = document.getElementById('stage') as HTMLCanvasElement;
-                        const w = canvas.width;
-                        const h = canvas.height;
-                        const gl = (canvas.getContext('webgl2') || canvas.getContext('webgl')) as
-                          | WebGLRenderingContext
-                          | null;
-                        let bytes: Uint8Array;
-                        if (gl) {
-                          bytes = new Uint8Array(w * h * 4);
-                          gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
-                        } else {
-                          const ctx = canvas.getContext('2d')!;
-                          bytes = new Uint8Array(ctx.getImageData(0, 0, w, h).data);
-                        }
-                        // Native base64 via Blob + FileReader. The previous
-                        // String.fromCharCode concat built an ~11 MB rope per frame
-                        // inside the renderer and was the main heap-churn source.
-                        const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/octet-stream' });
-                        const dataUrl: string = await new Promise<string>((resolve, reject) => {
-                          const fr = new FileReader();
-                          fr.onload = () => resolve(String(fr.result));
-                          fr.onerror = () => reject(fr.error ?? new Error('FileReader failed'));
-                          fr.readAsDataURL(blob);
-                        });
-                        return dataUrl.slice(dataUrl.indexOf(',') + 1);
-                      });
-                      return Buffer.from(b64, 'base64');
+                await workerPage!.evaluate((time: number) => {
+                  const api = window.__explainer || window.__tutorial;
+                  return api!.seek(time);
+                }, t);
+                if (frameMode === 'raw') {
+                  const b64 = await workerPage!.evaluate(async () => {
+                    const canvas = document.getElementById('stage') as HTMLCanvasElement;
+                    const w = canvas.width;
+                    const h = canvas.height;
+                    const gl = (canvas.getContext('webgl2') || canvas.getContext('webgl')) as
+                      | WebGLRenderingContext
+                      | null;
+                    let bytes: Uint8Array;
+                    if (gl) {
+                      bytes = new Uint8Array(w * h * 4);
+                      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+                    } else {
+                      const ctx = canvas.getContext('2d')!;
+                      bytes = new Uint8Array(ctx.getImageData(0, 0, w, h).data);
                     }
-                    return await workerPage!.screenshot({ type: 'png' });
-                  })(),
-                  new Promise<null>((r) => setTimeout(() => r(null), FRAME_TIMEOUT_MS)),
-                ]);
-
-                if (!frameDone) {
-                  throw new Error(
-                    `Single frame ${frame} render timed out after ${Math.round(FRAME_TIMEOUT_MS / 1000)}s ` +
-                      `(concurrency ${CONCURRENCY}, ${cpuCount} CPUs)`
-                  );
+                    // Native base64 via Blob + FileReader. The previous
+                    // String.fromCharCode concat built an ~11 MB rope per frame
+                    // inside the renderer and was the main heap-churn source.
+                    const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/octet-stream' });
+                    const dataUrl: string = await new Promise<string>((resolve, reject) => {
+                      const fr = new FileReader();
+                      fr.onload = () => resolve(String(fr.result));
+                      fr.onerror = () => reject(fr.error ?? new Error('FileReader failed'));
+                      fr.readAsDataURL(blob);
+                    });
+                    return dataUrl.slice(dataUrl.indexOf(',') + 1);
+                  });
+                  return Buffer.from(b64, 'base64');
                 }
+                return await workerPage!.screenshot({ type: 'png', timeout: Math.max(5_000, timeoutMs) });
+              };
+
+              /** One frame against a ceiling; `frame: null` means it did not arrive in time. */
+              const captureFrameWithin = async (
+                frame: number,
+                timeoutMs: number
+              ): Promise<{ frame: Buffer | null; elapsedMs: number; crashed: boolean }> => {
+                const startedAt = Date.now();
+                const framePromise = captureFrame(frame, timeoutMs);
+                // The loser of the race must not surface later as an unhandled
+                // rejection (Playwright's screenshot keeps running after we stop waiting).
+                framePromise.catch(() => undefined);
+                try {
+                  const frameBuffer = await Promise.race([
+                    framePromise,
+                    new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+                  ]);
+                  return { frame: frameBuffer, elapsedMs: Date.now() - startedAt, crashed: false };
+                } catch (err: any) {
+                  const message = String(err?.message ?? err);
+                  // A crashed/closed renderer is recoverable the same way a stall is:
+                  // rebuild the tab and retry the frame. Playwright's own action
+                  // timeouts (screenshot/fonts) are stalls too. Anything else is a bug.
+                  if (/Target crashed|Target closed|Protocol error|Session closed|page has been closed/i.test(message)) {
+                    return { frame: null, elapsedMs: Date.now() - startedAt, crashed: true };
+                  }
+                  if (/Timeout \d+ms exceeded|TimeoutError/i.test(message)) {
+                    return { frame: null, elapsedMs: Date.now() - startedAt, crashed: false };
+                  }
+                  throw err;
+                }
+              };
+
+              for (let frame = startFrame; frame < endFrame; frame++) {
+                let frameTimeoutMs = adaptiveFrameTimeoutMs(FRAME_TIMEOUT_MS, recentFrameMs);
+                let attempt = await captureFrameWithin(frame, frameTimeoutMs);
+
+                if (!attempt.frame) {
+                  // A stalled or crashed tab is usually swapped out, OOM-killed or
+                  // wedged, not permanently dead: rebuild it and retry this one frame
+                  // before aborting a render that may already be an hour in. A
+                  // genuinely broken frame still fails — loudly, with the host state
+                  // attached — on the second attempt.
+                  const pressure = readSystemPressure();
+                  console.warn(
+                    `[render] WARN frame ${frame} ${attempt.crashed ? 'crashed the render tab' : `exceeded ${frameTimeoutMs} ms`} ` +
+                      `(${describeSystemPressure(pressure)}) — restarting the tab and retrying once`
+                  );
+                  await restartRenderPage(`frame ${frame} ${attempt.crashed ? 'crashed' : 'stalled'}`);
+                  frameTimeoutMs *= 2;
+                  attempt = await captureFrameWithin(frame, frameTimeoutMs);
+                  if (!attempt.frame) {
+                    const now = readSystemPressure();
+                    throw new Error(
+                      `Single frame ${frame} render failed twice ` +
+                        `(${Math.round(frameTimeoutMs / 2000)}s + ${Math.round(frameTimeoutMs / 1000)}s, ` +
+                        `${attempt.crashed ? 'tab crashed again' : 'still no frame'}) ` +
+                        `(concurrency ${CONCURRENCY}, ${cpuCount} CPUs) · ${describeSystemPressure(now)}`
+                    );
+                  }
+                  console.warn(`[render] WARN frame ${frame} recovered after tab restart in ${attempt.elapsedMs} ms`);
+                }
+
+                const frameDone = attempt.frame;
+                recentFrameMs.push(attempt.elapsedMs);
+                if (recentFrameMs.length > 30) recentFrameMs.shift();
+                framesOnPage++;
 
                 await new Promise<void>((resolve, reject) => {
                   stdin.write(frameDone, (err) => (err ? reject(err) : resolve()));

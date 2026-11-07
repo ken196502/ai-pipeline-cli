@@ -22,6 +22,16 @@ export const XHotPipelineOptionsSchema = z.object({
   /** Force one clip transition shader for the explainer video. */
   explainerTransition: z.string().optional(),
   explainerConcurrency: z.number().int().min(1).max(8).optional(),
+  /** Host render service URL (defaults to EXPLAINER_RENDER_SERVICE). */
+  renderService: z
+    .object({
+      url: z.string().min(1),
+      token: z.string().optional(),
+      gpu: z.enum(['default', 'gpu', 'metal', 'vulkan', 'swiftshader']).optional(),
+    })
+    .optional(),
+  /** Explicitly bypass the render service and render on this machine. */
+  forceLocalRender: z.boolean().optional(),
   // Backward compatibility options
   tutorialEngine: z.enum(['firefox', 'chromium']).optional(),
   tutorialFps: z.number().int().min(10).max(60).optional(),

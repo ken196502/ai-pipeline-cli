@@ -250,6 +250,8 @@ export async function executeXHotPipeline(
         stylePreset: options.explainerStyle?.startsWith('preset:') ? options.explainerStyle : undefined,
         style: options.explainerStyle && !options.explainerStyle.startsWith('preset:') ? options.explainerStyle : undefined,
         transition: options.explainerTransition,
+        renderService: options.renderService,
+        forceLocalRender: options.forceLocalRender,
         profileDir,
         onProgress: (stg, msg) => notify('x-video', `[${stg}] ${msg}`),
       });

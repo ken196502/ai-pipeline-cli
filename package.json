@@ -25,6 +25,7 @@
     "lib:asr": "tsx src/libs/asr/cli.ts",
     "pipeline:xhot": "tsx src/cli.ts xhot",
     "pipeline:flowTutor": "tsx src/cli.ts flowTutor",
+    "render-service": "tsx src/libs/player/render-service-entry.ts",
     "build": "tsc",
     "test": "tsx --test",
     "test:all": "tsx --test tests/*.test.ts",

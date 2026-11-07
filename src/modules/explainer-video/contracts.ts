@@ -8,10 +8,17 @@ import type {
   TutorialGenerationSummary,
   TutorialTimeline,
 } from '../../libs/player/contracts.js';
+import type { RenderServiceRouteConfig } from '../../libs/player/render.js';
 import type { OpusVoiceTrackResult } from '../../libs/player/tts.js';
 import type { ExplainerStyle, ExplainerStylePatch } from '../../libs/player/style.js';
 import type { XHotEvalResult } from '../evaluation/contracts.js';
 import type { XHotHarvestResult } from '../harvest/contracts.js';
+
+/** Host render service routing shared by the explainer production entry points. */
+export interface ExplainerRenderServiceOptions extends RenderServiceRouteConfig {
+  /** Explicitly bypass the render service and render locally. */
+  forceLocalRender?: boolean;
+}
 
 export interface CreateExplainerVideoOptions {
   query: string;
@@ -35,6 +42,10 @@ export interface CreateExplainerVideoOptions {
   style?: ExplainerStyle | ExplainerStylePatch | string;
   /** Force one clip transition shader for the whole video. */
   transition?: string;
+  /** Host render service routing (URL/token/GPU). */
+  renderService?: RenderServiceRouteConfig;
+  /** Explicitly bypass the render service and render on this machine. */
+  forceLocalRender?: boolean;
   onProgress?: (stage: string, message: string) => void;
 }
 export type CreateXHotVideoOptions = CreateExplainerVideoOptions;
@@ -98,6 +109,10 @@ export interface ExplainerProduceOptions {
   preset?: string;
   /** Skip frame rendering (HTML preview + narration only). */
   previewOnly?: boolean;
+  /** Host render service routing (URL/token/GPU). */
+  renderService?: RenderServiceRouteConfig;
+  /** Explicitly bypass the render service and render on this machine. */
+  forceLocalRender?: boolean;
   /** Custom video output filename (defaults to 'explainer-video.mp4'). */
   videoFilename?: string;
   /** Custom grid preview filename (defaults to 'explainer-grid.jpg'). */

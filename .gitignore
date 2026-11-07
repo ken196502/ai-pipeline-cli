@@ -54,5 +54,11 @@ storage/
 cookies.txt
 scripts/
 
+# Host render service generated artifacts (never commit)
+host-render/
+*.command
+.render-service.env
+render-service.log
+
 
 

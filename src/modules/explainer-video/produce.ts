@@ -30,6 +30,11 @@ import {
   type ExplainerStylePatch,
 } from '../../libs/player/style.js';
 import type { ExplainerProduceOptions } from './contracts.js';
+import {
+  formatNarrativeViolations,
+  lintNarrative,
+  type NarrativeThresholds,
+} from './narrative-lint.js';
 
 export const EXPLAINER_DEFAULTS = {
   fps: 30,
@@ -235,6 +240,8 @@ export async function produceExplainerVideo(
       concurrency: options.concurrency,
       crf,
       preset,
+      renderService: options.renderService,
+      forceLocalRender: options.forceLocalRender,
       onProgress: (renderedFrames, totalFrames) => {
         framesRendered = renderedFrames;
         const pct = totalFrames > 0 ? (renderedFrames / totalFrames) * 100 : 0;
@@ -379,11 +386,26 @@ export async function loadStoryboardWithMigration(filePath: string): Promise<{
 /** Raised when element phrases are not verbatim excerpts of their narration. */
 class PhraseExcerptError extends Error {}
 
+/** Raised when a storyboard passes the schema but fails the narrative lint. */
+class NarrativeLintError extends Error {}
+
 function assertPhraseExcerpts(storyboard: ExplainerStoryboard): void {
   const errors = collectPhraseExcerptErrors(storyboard);
   if (errors.length > 0) {
     throw new PhraseExcerptError(
       `every element phrase must be copied verbatim from its narration sentence: ${errors.join('; ')}`
+    );
+  }
+}
+
+function assertNarrativeLint(
+  storyboard: ExplainerStoryboard,
+  thresholds: Partial<NarrativeThresholds>
+): void {
+  const result = lintNarrative(storyboard, thresholds);
+  if (result.violations.length > 0) {
+    throw new NarrativeLintError(
+      `storyboard fails the narrative density check:\n${formatNarrativeViolations(result)}`
     );
   }
 }
@@ -402,6 +424,12 @@ export interface GenerateExplainerStoryboardParams {
    */
   assetIds?: ReadonlySet<string>;
   iconNames?: ReadonlySet<string>;
+  /**
+   * Narrative density/structure thresholds. Only fireship-style generation
+   * passes these; when omitted (documentary) the narrative lint never runs and
+   * the storyboard is returned exactly as before.
+   */
+  narrativeThresholds?: Partial<NarrativeThresholds>;
 }
 
 /**
@@ -464,6 +492,12 @@ export async function generateExplainerStoryboard(
           throw new Error(result.error.issues.map((i) => i.message).join('; '));
         }
         assertPhraseExcerpts(result.data);
+        // Narrative violations throw inside this try block on purpose: they
+        // become the repairNote for the next attempt, and a storyboard that
+        // never satisfies the lint hard-fails after MAX_ATTEMPTS.
+        if (params.narrativeThresholds) {
+          assertNarrativeLint(result.data, params.narrativeThresholds);
+        }
         return result.data;
       }
 

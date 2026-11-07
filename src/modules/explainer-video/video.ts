@@ -334,6 +334,8 @@ export async function createExplainerVideo(
     stylePreset: options.stylePreset ?? 'preset:cyan-tech',
     style: options.style,
     transition: options.transition,
+    renderService: options.renderService,
+    forceLocalRender: options.forceLocalRender,
     resultFilename: 'explainer-result.json',
     storyboardFilename: '10-explainer-storyboard.json',
     gridOptions: () => ({ count: 9 }),

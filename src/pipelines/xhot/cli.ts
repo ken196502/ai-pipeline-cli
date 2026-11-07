@@ -3,6 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import pc from 'picocolors';
 import { executeXHotPipeline } from './execute.js';
+import { resumeXHotVideo } from './resume.js';
 import { printExecutiveSummary } from './report.js';
 import { exitAfterFlush } from '../../utils/shutdown.js';
 import {
@@ -15,6 +16,7 @@ import {
 import { formatDurationMs } from '../../utils/time.js';
 import { acquirePipelineLock, parseTopics, runPipeline24h } from '../core/index.js';
 import { parseSearchLangOption } from '../../libs/text/index.js';
+import { resolveRenderServiceGpuMode } from '../../libs/player/render-service-client.js';
 import type { XHotPipelineOptions, XHotFullResult } from './contracts.js';
 
 /**
@@ -48,7 +50,16 @@ export function attachXHotOptions(cmd: Command): Command {
     .option('--headless', 'Force browser headless mode', false)
     .option('--skip-video', 'Skip explainer video generation', false)
     .option('--explainer-engine <engine>', 'Explainer video render engine (chromium, firefox)', 'chromium')
+    .option(
+      '--explainer-gl <mode>',
+      'Chromium GL backend for rendering: default (Chromium picks) | gpu (ANGLE/desktop GL) | vulkan | swiftshader',
+      'default'
+    )
     .option('--explainer-fps <n>', 'Frame rate of explainer video', (v) => parseInt(v, 10), 30)
+    .option('--render-service <url>', 'Host render service base URL, e.g. http://192.168.64.1:8790 (sets EXPLAINER_RENDER_SERVICE)')
+    .option('--render-service-token <token>', 'Bearer token for the host render service (sets EXPLAINER_RENDER_SERVICE_TOKEN)')
+    .option('--render-gpu <mode>', 'GPU mode for the host render service: default | gpu | metal | vulkan | swiftshader (defaults to --explainer-gl)')
+    .option('--local-render', 'Bypass the host render service and render locally on this machine', false)
     .option('--explainer-subtitles', 'Enable narration subtitles / captions', false)
     .option('--explainer-style <path|preset:name>', 'Explainer video style document (theme/timing/components/transitions/post) — JSON path or preset:ember-dark|cyan-tech|apple-clean')
     .option('--explainer-transition <name>', 'Force one clip transition shader (directionalWarp, lumaGlitch, radialBloom, crossZoom, dreamyZoom, displacement, emberBurn)')
@@ -58,13 +69,17 @@ export function attachXHotOptions(cmd: Command): Command {
     .option('--tts-voice <name>', 'edge-tts voice name for narration')
     .option('--tts-rate <rate>', 'edge-tts speech rate adjustment (e.g. +10%)', '+0%')
     .option('--search-lang <code>', 'Language operator for X search (e.g. en, zh; "none" disables the filter)', 'en')
-    .option('--dry-run', 'Run pipeline in dry-run mode without live network/generation calls', false);
+    .option('--dry-run', 'Run pipeline in dry-run mode without live network/generation calls', false)
+    .option(
+      '--resume <runDir>',
+      'Re-render the explainer video of an existing run from its committed chunks (no LLM, no TTS, no X scraping)'
+    );
 }
 
 /**
  * Sends rich success notifications via Telegram/Webhook including stats and media attachment.
  */
-async function sendSuccessNotification(result: XHotFullResult): Promise<void> {
+export async function sendSuccessNotification(result: XHotFullResult): Promise<void> {
   const explainer = result.explainer || result.tutorial;
   const minutes = (result.totalDurationMs / 60000).toFixed(1);
   const msgLines = [
@@ -107,6 +122,21 @@ async function sendSuccessNotification(result: XHotFullResult): Promise<void> {
     });
   }
 
+  // Deliver explainer video contact grid directly to Telegram (strictly matching FlowTutor behavior: no fallback)
+  const gridPath = explainer?.gridPath && fs.existsSync(explainer.gridPath) ? explainer.gridPath : undefined;
+  if (gridPath) {
+    const gridCaption = `🖼 Explainer video grid — ${explainer?.sceneCount ?? 0} scenes, ${explainer?.totalDurationSec.toFixed(0)}s`;
+    await sendMsg(gridCaption, undefined, {
+      filePath: gridPath,
+      fileName: 'explainer-grid.jpg',
+      mimetype: 'image/jpeg',
+    }).catch((e) => {
+      console.error(pc.yellow(`[webhook] Warning: Failed to send explainer video grid: ${e.message}`));
+    });
+  } else {
+    console.warn(pc.yellow('[webhook] No explainer video grid available — skipping grid delivery'));
+  }
+
   // Deliver the main summary notification with FINAL_REPORT.html (matching VideoGen)
   let attachment: { filePath: string; fileName?: string; mimetype?: string } | undefined;
   const htmlReportPath = result.reportHtmlPath || path.join(result.outDir, 'FINAL_REPORT.html');
@@ -115,18 +145,6 @@ async function sendSuccessNotification(result: XHotFullResult): Promise<void> {
       filePath: htmlReportPath,
       fileName: 'FINAL_REPORT.html',
       mimetype: 'text/html',
-    };
-  } else if (explainer?.gridPath && fs.existsSync(explainer.gridPath)) {
-    attachment = {
-      filePath: explainer.gridPath,
-      fileName: 'explainer-grid.jpg',
-      mimetype: 'image/jpeg',
-    };
-  } else if (result.gridImagePath && fs.existsSync(result.gridImagePath)) {
-    attachment = {
-      filePath: result.gridImagePath,
-      fileName: 'xhot-grid.png',
-      mimetype: 'image/png',
     };
   }
 
@@ -179,6 +197,48 @@ export async function handleXHotCommand(queryArg?: string, opts: any = {}): Prom
     pipelineIds: PIPELINE_IDS,
   });
 
+  // Chromium GL backend is read from the environment by the renderer (same
+  // mechanism as EXPLAINER_RENDER_CONCURRENCY / EXPLAINER_FRAME_TIMEOUT_MS).
+  if (opts.explainerGl) process.env.EXPLAINER_CHROMIUM_GL = String(opts.explainerGl);
+
+  // Host render service routing. Explicit CLI values win over .env; an unknown
+  // --render-gpu value fails here rather than mid-render.
+  if (opts.renderService) process.env.EXPLAINER_RENDER_SERVICE = String(opts.renderService);
+  if (opts.renderServiceToken) {
+    process.env.EXPLAINER_RENDER_SERVICE_TOKEN = String(opts.renderServiceToken);
+  }
+  const renderGpu = opts.renderGpu ? resolveRenderServiceGpuMode(String(opts.renderGpu)) : undefined;
+  if (renderGpu) process.env.EXPLAINER_RENDER_GPU = renderGpu;
+  if (opts.localRender) {
+    console.log(pc.yellow('[render] --local-render set — bypassing render service'));
+  }
+  const renderService = opts.renderService
+    ? {
+        url: String(opts.renderService),
+        token: opts.renderServiceToken ? String(opts.renderServiceToken) : undefined,
+        gpu: renderGpu,
+      }
+    : undefined;
+
+  // Resume path: re-render Stage 6/7 of an existing run. No topic is needed
+  // because the search/eval/harvest/storyboard/TTS output is already on disk.
+  if (opts.resume) {
+    console.log(pc.bold(pc.cyan(`\n♻️  XHOT RESUME: re-rendering ${opts.resume}\n`)));
+    const result = await resumeXHotVideo({
+      runDir: opts.resume,
+      engine: opts.explainerEngine ?? 'chromium',
+      concurrency: opts.explainerConcurrency,
+      profileDir: opts.profileDir,
+      renderService,
+      forceLocalRender: Boolean(opts.localRender),
+      onProgress: (stage, message) => console.log(pc.dim(`[resume] [${stage}] ${message}`)),
+    });
+    printExecutiveSummary(result);
+    await sendSuccessNotification(result);
+    await exitAfterFlush(0, 'xhot');
+    return;
+  }
+
   // Normalize --24h flag value
   const is24hMode = opts['24h'] !== undefined;
   let maxRunsPer24h = 1;
@@ -218,6 +278,8 @@ export async function handleXHotCommand(queryArg?: string, opts: any = {}): Prom
     explainerSubtitles: Boolean(opts.explainerSubtitles || opts.tutorialSubtitles),
     explainerStyle: opts.explainerStyle,
     explainerTransition: opts.explainerTransition,
+    renderService,
+    forceLocalRender: Boolean(opts.localRender),
     ttsVoice: opts.ttsVoice,
     ttsRate: opts.ttsRate || '+0%',
     searchLang: parseSearchLang(opts.searchLang),
@@ -264,6 +326,20 @@ export async function handleXHotCommand(queryArg?: string, opts: any = {}): Prom
       },
       onRoundSuccess: async (topic, result, round) => {
         printExecutiveSummary(result);
+        const failedStages = Object.values(result.stages).filter((s) => s.status === 'failed');
+        if (failedStages.length > 0) {
+          // Stage failures do not throw out of executeXHotPipeline, so a "completed
+          // successfully" message here would contradict the error already sent.
+          await reportPipelineError(
+            new Error(
+              `Stage(s) failed: ${failedStages.map((s) => `${s.stage}: ${s.error ?? s.summary ?? 'unknown error'}`).join('; ')}`
+            ),
+            topic,
+            opts.outDir,
+            false
+          );
+          return;
+        }
         await sendSuccessNotification(result);
       },
       onRoundError: async (topic, err: any, round) => {
@@ -295,6 +371,21 @@ export async function handleXHotCommand(queryArg?: string, opts: any = {}): Prom
     try {
       const result = await executeXHotPipeline(options);
       printExecutiveSummary(result);
+      const failedStages = Object.values(result.stages).filter((s) => s.status === 'failed');
+      if (failedStages.length > 0) {
+        // The failing stage already sent its detailed error alert; sending a
+        // "completed successfully" message on top of it is a lie (2026-11-05:
+        // Stage 6 timed out and the run still reported success).
+        console.error(
+          pc.red(
+            `\n❌ Xhot pipeline finished with failed stage(s): ${failedStages
+              .map((s) => `${s.stage} (${s.error ?? s.summary ?? 'unknown error'})`)
+              .join('; ')}`
+          )
+        );
+        await exitAfterFlush(1, 'xhot');
+        return;
+      }
       await sendSuccessNotification(result);
     } catch (err: any) {
       await reportPipelineError(err, currentTopic, opts.outDir, true);
